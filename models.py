@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -13,6 +13,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     audit_logs = relationship("AuditLog", back_populates="user")
+    location_logs = relationship("LocationLog", back_populates="user")
 
 
 class Location(Base):
@@ -23,9 +24,11 @@ class Location(Base):
     name = Column(String(100), nullable=False)
     capacity = Column(Integer, nullable=False)
     used = Column(Integer, default=0)
+    frozen = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     batches = relationship("Batch", back_populates="location")
+    location_logs = relationship("LocationLog", back_populates="location")
 
 
 class Batch(Base):
@@ -61,3 +64,17 @@ class AuditLog(Base):
 
     batch = relationship("Batch", back_populates="audit_logs")
     user = relationship("User", back_populates="audit_logs")
+
+
+class LocationLog(Base):
+    __tablename__ = "location_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    action = Column(String(50), nullable=False)
+    remark = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    location = relationship("Location", back_populates="location_logs")
+    user = relationship("User", back_populates="location_logs")

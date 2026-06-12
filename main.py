@@ -34,6 +34,9 @@ ACTION_RETURN = "RETURN"
 ACTION_SEAL = "SEAL"
 ACTION_SCRAP = "SCRAP"
 
+ACTION_LOCATION_FREEZE = "FREEZE"
+ACTION_LOCATION_UNFREEZE = "UNFREEZE"
+
 
 def get_user_or_404(db: Session, username: str) -> models.User:
     user = db.query(models.User).filter(models.User.username == username).first()
@@ -112,6 +115,58 @@ def audit_log_to_response(log: models.AuditLog) -> schemas.AuditLogResponse:
     )
 
 
+def add_location_log(db: Session, location_id: int, user_id: int, action: str,
+                     remark: Optional[str] = None):
+    log = models.LocationLog(
+        location_id=location_id,
+        user_id=user_id,
+        action=action,
+        remark=remark
+    )
+    db.add(log)
+
+
+def location_log_to_response(log: models.LocationLog) -> schemas.LocationLogResponse:
+    return schemas.LocationLogResponse(
+        id=log.id,
+        location_id=log.location_id,
+        location_code=log.location.code if log.location else None,
+        user_id=log.user_id,
+        username=log.user.username if log.user else None,
+        user_role=log.user.role if log.user else None,
+        action=log.action,
+        remark=log.remark,
+        created_at=log.created_at
+    )
+
+
+def migrate_db():
+    from sqlalchemy import text
+    db = next(get_db())
+    try:
+        db.execute(text("ALTER TABLE locations ADD COLUMN frozen BOOLEAN DEFAULT 0 NOT NULL"))
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS location_logs (
+                id INTEGER PRIMARY KEY,
+                location_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                action VARCHAR(50) NOT NULL,
+                remark TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (location_id) REFERENCES locations (id),
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """))
+        db.commit()
+    except Exception:
+        db.rollback()
+    db.close()
+
+
 def init_sample_data():
     db = next(get_db())
 
@@ -169,6 +224,7 @@ def init_sample_data():
     db.close()
 
 
+migrate_db()
 init_sample_data()
 
 
@@ -225,6 +281,114 @@ def get_location(code: str, db: Session = Depends(get_db)):
     return get_location_or_404(db, code)
 
 
+@app.post("/api/locations/{code}/freeze", response_model=schemas.LocationResponse, summary="冻结库位")
+def freeze_location(code: str, req: schemas.LocationActionRequest, db: Session = Depends(get_db)):
+    user = get_user_or_404(db, req.username)
+    require_role(user, [ROLE_REVIEWER])
+
+    location = get_location_or_404(db, code)
+    if location.frozen:
+        raise HTTPException(
+            status_code=400,
+            detail=f"库位 {code} 已处于冻结状态"
+        )
+
+    location.frozen = True
+    add_location_log(db, location.id, user.id, ACTION_LOCATION_FREEZE, remark=req.remark)
+    db.commit()
+    db.refresh(location)
+    return location
+
+
+@app.post("/api/locations/{code}/unfreeze", response_model=schemas.LocationResponse, summary="解冻库位")
+def unfreeze_location(code: str, req: schemas.LocationActionRequest, db: Session = Depends(get_db)):
+    user = get_user_or_404(db, req.username)
+    require_role(user, [ROLE_REVIEWER])
+
+    location = get_location_or_404(db, code)
+    if not location.frozen:
+        raise HTTPException(
+            status_code=400,
+            detail=f"库位 {code} 未处于冻结状态"
+        )
+
+    location.frozen = False
+    add_location_log(db, location.id, user.id, ACTION_LOCATION_UNFREEZE, remark=req.remark)
+    db.commit()
+    db.refresh(location)
+    return location
+
+
+@app.get("/api/location-logs", summary="库位操作日志查询")
+def list_location_logs(
+    location_code: Optional[str] = None,
+    username: Optional[str] = None,
+    action: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.LocationLog)
+
+    if location_code:
+        loc = db.query(models.Location).filter(models.Location.code == location_code).first()
+        if loc:
+            query = query.filter(models.LocationLog.location_id == loc.id)
+        else:
+            return {"items": [], "total": 0}
+
+    if username:
+        user = db.query(models.User).filter(models.User.username == username).first()
+        if user:
+            query = query.filter(models.LocationLog.user_id == user.id)
+        else:
+            return {"items": [], "total": 0}
+
+    if action:
+        query = query.filter(models.LocationLog.action == action)
+
+    query = query.order_by(models.LocationLog.created_at.desc())
+    logs = query.all()
+    items = [location_log_to_response(log) for log in logs]
+    return {"items": items, "total": len(items)}
+
+
+@app.get("/api/export/location-logs", summary="导出库位操作日志为 JSON")
+def export_location_logs(
+    location_code: Optional[str] = None,
+    username: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    result = list_location_logs(location_code=location_code, username=username, db=db)
+
+    export_data = {
+        "export_time": datetime.utcnow().isoformat(),
+        "filter": {
+            "location_code": location_code,
+            "username": username
+        },
+        "total": result["total"],
+        "records": []
+    }
+
+    for log in result["items"]:
+        export_data["records"].append({
+            "id": log.id,
+            "location_code": log.location_code,
+            "operator": log.username,
+            "operator_role": log.user_role,
+            "action": log.action,
+            "remark": log.remark,
+            "operated_at": log.created_at.isoformat()
+        })
+
+    return JSONResponse(
+        content=export_data,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="location_logs_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.json"'
+        }
+    )
+
+
 @app.post("/api/batches", response_model=schemas.BatchResponse, summary="登记留样批次")
 def create_batch(batch_in: schemas.BatchCreate, db: Session = Depends(get_db)):
     existing = db.query(models.Batch).filter(models.Batch.batch_no == batch_in.batch_no).first()
@@ -238,6 +402,11 @@ def create_batch(batch_in: schemas.BatchCreate, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=400,
             detail=f"库位 {location.code} 容量已满（{location.used}/{location.capacity}），无法存放新批次"
+        )
+    if location.frozen:
+        raise HTTPException(
+            status_code=400,
+            detail=f"库位 {location.code} 已冻结，不能登记新批次"
         )
 
     batch = models.Batch(

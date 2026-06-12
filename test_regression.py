@@ -208,7 +208,159 @@ def run_phase1():
     print(f"  批次 REAG-2026-0002 可用数量: {d.get('available_quantity')}")
     check("可用数量保持 50 不变", d.get("available_quantity") == 50, f"实际: {d.get('available_quantity')}")
 
-    section("14. 记录重启前状态（用于重启后比对）")
+    section("14. 库位管理 - 冻结/解冻")
+
+    section("14.1 库位列表包含 frozen 字段")
+    resp = requests.get(f"{BASE}/api/locations")
+    d = resp.json()
+    print(f"  库位数量: {d['total']}")
+    check("状态码 200", resp.status_code == 200)
+    check("每个库位都有 frozen 字段", all("frozen" in loc for loc in d["items"]))
+    loc_a02 = [loc for loc in d["items"] if loc["code"] == "A-02"][0]
+    check("A-02 初始未冻结", loc_a02["frozen"] == False, f"实际: {loc_a02['frozen']}")
+    loc_a02_used_before = loc_a02["used"]
+
+    section("14.2 复核员冻结 A-02 库位")
+    resp = requests.post(f"{BASE}/api/locations/A-02/freeze", json={
+        "username": "charlie",
+        "remark": "设备检修，临时冻结"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 200", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+    check("frozen 变为 True", d.get("frozen") == True, f"实际: {d.get('frozen')}")
+
+    section("14.3 冻结后登记新批次到 A-02 应失败")
+    resp = requests.post(f"{BASE}/api/batches", json={
+        "batch_no": "FREEZE-TEST-001",
+        "reagent_name": "冻结测试试剂",
+        "total_quantity": 10,
+        "expiry_date": "2027-01-01",
+        "location_code": "A-02",
+        "username": "alice"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '冻结'", "冻结" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    resp2 = requests.get(f"{BASE}/api/locations/A-02")
+    d2 = resp2.json()
+    print(f"  A-02 已用数量: {d2.get('used')}")
+    check("库位已用数量不变", d2.get("used") == loc_a02_used_before, f"实际: {d2.get('used')}")
+
+    section("14.4 普通操作员尝试冻结（权限不足）")
+    resp = requests.post(f"{BASE}/api/locations/A-01/freeze", json={
+        "username": "alice",
+        "remark": "越权尝试冻结"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 403", resp.status_code == 403, f"实际: {resp.status_code}")
+    check("错误信息含 '权限'", "权限" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    resp2 = requests.get(f"{BASE}/api/locations/A-01")
+    d2 = resp2.json()
+    print(f"  A-01 冻结状态: {d2.get('frozen')}")
+    check("A-01 仍未冻结（状态未改变）", d2.get("frozen") == False, f"实际: {d2.get('frozen')}")
+
+    section("14.5 查询库位操作日志 - 按库位")
+    resp = requests.get(f"{BASE}/api/location-logs", params={"location_code": "A-02"})
+    d = resp.json()
+    print(f"  A-02 日志条数: {d['total']}")
+    check("至少有 1 条日志", d["total"] >= 1)
+    logs = d["items"]
+    check("最新日志为 FREEZE 动作", logs[0]["action"] == "FREEZE", f"实际: {logs[0]['action']}")
+    check("操作人是 charlie", logs[0]["username"] == "charlie", f"实际: {logs[0]['username']}")
+    check("操作人角色是 reviewer", logs[0]["user_role"] == "reviewer", f"实际: {logs[0]['user_role']}")
+    check("备注含 '检修'", "检修" in (logs[0].get("remark") or ""), f"实际: {logs[0].get('remark')}")
+
+    section("14.6 查询库位操作日志 - 按操作人")
+    resp = requests.get(f"{BASE}/api/location-logs", params={"username": "charlie"})
+    d = resp.json()
+    print(f"  charlie 的库位日志条数: {d['total']}")
+    check("charlie 至少有 1 条日志", d["total"] >= 1)
+    charlie_actions = [log["action"] for log in d["items"]]
+    check("charlie 有 FREEZE 记录", "FREEZE" in charlie_actions)
+
+    section("14.7 导出库位操作日志")
+    resp = requests.get(f"{BASE}/api/export/location-logs", params={"location_code": "A-02"})
+    export_data = resp.json()
+    print(f"  导出记录数: {export_data['total']}")
+    check("导出 total >= 1", export_data["total"] >= 1)
+    check("导出有 records 字段", "records" in export_data)
+    check("导出 records 有 FREEZE", any(r["action"] == "FREEZE" for r in export_data["records"]))
+    check("导出每条都有 operator", all(r.get("operator") for r in export_data["records"]))
+    check("导出每条都有 operator_role", all(r.get("operator_role") for r in export_data["records"]))
+
+    with open("location_log_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(export_data, f, ensure_ascii=False, indent=2)
+    print("  已保存 location_log_before_restart.json")
+
+    section("14.8 复核员解冻 A-02 库位")
+    resp = requests.post(f"{BASE}/api/locations/A-02/unfreeze", json={
+        "username": "charlie",
+        "remark": "检修完成，解冻"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 200", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+    check("frozen 变为 False", d.get("frozen") == False, f"实际: {d.get('frozen')}")
+
+    section("14.9 解冻后登记新批次到 A-02 应成功")
+    resp = requests.post(f"{BASE}/api/batches", json={
+        "batch_no": "FREEZE-TEST-002",
+        "reagent_name": "解冻后测试试剂",
+        "total_quantity": 15,
+        "expiry_date": "2027-03-01",
+        "location_code": "A-02",
+        "username": "bob",
+        "remark": "解冻后登记的批次"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 200", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+    check("批次号正确", d.get("batch_no") == "FREEZE-TEST-002")
+    check("状态为 REGISTERED", d.get("status") == "REGISTERED")
+
+    resp2 = requests.get(f"{BASE}/api/locations/A-02")
+    d2 = resp2.json()
+    print(f"  A-02 已用数量: {d2.get('used')}")
+    check("库位已用数量 +1", d2.get("used") == loc_a02_used_before + 1, f"实际: {d2.get('used')}")
+
+    section("14.10 再次冻结 A-02（保持状态用于重启验证）")
+    resp = requests.post(f"{BASE}/api/locations/A-02/freeze", json={
+        "username": "charlie",
+        "remark": "重启验证用，保持冻结"
+    })
+    d = resp.json()
+    check("再次冻结成功", resp.status_code == 200 and d.get("frozen") == True)
+
+    section("14.11 已有冻结批次仍可正常查询和操作")
+    resp = requests.get(f"{BASE}/api/batches/FREEZE-TEST-002")
+    d = resp.json()
+    print(f"  批次 FREEZE-TEST-002 状态: {d.get('status')}")
+    check("批次可查询", resp.status_code == 200)
+    check("批次状态为 REGISTERED", d.get("status") == "REGISTERED")
+
+    resp = requests.post(f"{BASE}/api/batches/FREEZE-TEST-002/pickup", json={
+        "username": "alice",
+        "quantity": 3,
+        "remark": "冻结库位上的批次仍可领取"
+    })
+    d = resp.json()
+    print(f"  领取后状态: {d.get('status')}, 可用: {d.get('available_quantity')}")
+    check("冻结库位上的批次可以领取", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+    check("可用数量变为 12", d.get("available_quantity") == 12, f"实际: {d.get('available_quantity')}")
+
+    section("14.12 保存重启前库位状态")
+    resp = requests.get(f"{BASE}/api/locations/A-02")
+    loc_before = resp.json()
+    print(f"  A-02 重启前: frozen={loc_before['frozen']}, used={loc_before['used']}")
+    with open("location_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(loc_before, f, ensure_ascii=False, indent=2)
+
+    section("15. 记录重启前状态（用于重启后比对）")
     resp = requests.get(f"{BASE}/api/batches/REG-TEST-001")
     before = resp.json()
     print(f"  批次: {before['batch_no']}, 状态: {before['status']}, 可用: {before['available_quantity']}")
@@ -292,9 +444,49 @@ def run_restart_checks():
     check("导出 REGISTER 的备注一致", before_reg.get("remark") == after_reg.get("remark"))
     check("导出 REGISTER 的数量一致", before_reg["quantity"] == after_reg["quantity"])
 
+    section("18. 重启后 - 库位冻结状态一致性")
+    with open("location_before_restart.json", "r", encoding="utf-8") as f:
+        loc_before = json.load(f)
+    resp = requests.get(f"{BASE}/api/locations/A-02")
+    loc_after = resp.json()
+    print(f"  重启前: frozen={loc_before['frozen']}, used={loc_before['used']}")
+    print(f"  重启后: frozen={loc_after['frozen']}, used={loc_after['used']}")
+    check("冻结状态一致", loc_before["frozen"] == loc_after["frozen"], f"{loc_before['frozen']} vs {loc_after['frozen']}")
+    check("已用数量一致", loc_before["used"] == loc_after["used"], f"{loc_before['used']} vs {loc_after['used']}")
+
+    section("19. 重启后 - 库位操作日志一致性")
+    resp = requests.get(f"{BASE}/api/location-logs", params={"location_code": "A-02"})
+    d = resp.json()
+    print(f"  重启后 A-02 库位日志数: {d['total']}")
+    check("库位日志数 >= 3（冻结、解冻、再冻结）", d["total"] >= 3, f"实际: {d['total']}")
+    actions = [log["action"] for log in d["items"]]
+    print(f"  动作序列: {actions}")
+    check("包含 FREEZE 动作", "FREEZE" in actions)
+    check("包含 UNFREEZE 动作", "UNFREEZE" in actions)
+    check("操作人都是 charlie", all(log["username"] == "charlie" for log in d["items"]))
+    check("操作人角色都是 reviewer", all(log["user_role"] == "reviewer" for log in d["items"]))
+
+    section("20. 重启后 - 库位日志导出一致性")
+    with open("location_log_before_restart.json", "r", encoding="utf-8") as f:
+        before_loc_export = json.load(f)
+    resp = requests.get(f"{BASE}/api/export/location-logs", params={"location_code": "A-02"})
+    after_loc_export = resp.json()
+    print(f"  重启前导出 total: {before_loc_export['total']}")
+    print(f"  重启后导出 total: {after_loc_export['total']}")
+    check("库位日志导出记录数一致（重启后又多了一次冻结，所以重启后应该更多）",
+          after_loc_export["total"] >= before_loc_export["total"])
+
+    section("21. 重启后 - 冻结库位上的批次状态一致")
+    resp = requests.get(f"{BASE}/api/batches/FREEZE-TEST-002")
+    batch_after = resp.json()
+    print(f"  FREEZE-TEST-002 状态: {batch_after['status']}, 可用: {batch_after['available_quantity']}")
+    check("批次状态仍为 IN_USE", batch_after["status"] == "IN_USE", f"实际: {batch_after['status']}")
+    check("可用数量仍为 12", batch_after["available_quantity"] == 12, f"实际: {batch_after['available_quantity']}")
+
     section("重启后验证总结")
     print(f"  通过: {passed}, 失败: {failed}")
-    for f in ["export_before_restart.json", "batch_before_restart.json", "batch2_before_restart.json"]:
+    for f in ["export_before_restart.json", "batch_before_restart.json", "batch2_before_restart.json",
+              "location_before_restart.json", "location_log_before_restart.json"]:
         try:
             os.remove(f)
         except:

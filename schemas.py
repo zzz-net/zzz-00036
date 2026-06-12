@@ -16,6 +16,7 @@ class LocationCreate(LocationBase):
 class LocationResponse(LocationBase):
     id: int
     used: int
+    frozen: bool
     created_at: datetime
 
     class Config:
@@ -105,3 +106,28 @@ class AuditLogListResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     detail: str
+
+
+class LocationActionRequest(BaseModel):
+    username: str
+    remark: Optional[str] = None
+
+
+class LocationLogResponse(BaseModel):
+    id: int
+    location_id: int
+    location_code: Optional[str] = None
+    user_id: int
+    username: Optional[str] = None
+    user_role: Optional[str] = None
+    action: str
+    remark: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class LocationLogListResponse(BaseModel):
+    items: List[LocationLogResponse]
+    total: int
