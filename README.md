@@ -114,7 +114,7 @@ curl -s http://127.0.0.1:8000/api/locations | python -m json.tool
 curl -s http://127.0.0.1:8000/api/batches | python -m json.tool
 ```
 
-#### 2. 登记新批次
+#### 2. 登记新批次（建档）
 
 ```bash
 curl -s -X POST http://127.0.0.1:8000/api/batches \
@@ -124,11 +124,17 @@ curl -s -X POST http://127.0.0.1:8000/api/batches \
     "reagent_name": "酶联免疫试剂盒",
     "total_quantity": 30,
     "expiry_date": "2027-03-15",
-    "location_code": "A-01"
+    "location_code": "A-01",
+    "username": "bob",
+    "remark": "新批次入库，来自供应商XYZ"
   }' | python -m json.tool
 ```
 
-预期结果：状态为 `REGISTERED`，可用数量 30。
+字段说明：
+- `username`: 登记人（必填，必须是已存在的用户）
+- `remark`: 建档备注（可选）
+
+预期结果：状态为 `REGISTERED`，可用数量 30。同时会写入一条 `REGISTER` 审计日志，记录登记人、角色和建档备注。
 
 #### 3. 操作员领取留样
 
@@ -274,7 +280,8 @@ curl -s -X POST http://127.0.0.1:8000/api/batches \
     "reagent_name": "测试试剂1",
     "total_quantity": 10,
     "expiry_date": "2027-01-01",
-    "location_code": "C-01"
+    "location_code": "C-01",
+    "username": "alice"
   }' | python -m json.tool
 
 # 放入第 2 个批次
@@ -285,7 +292,8 @@ curl -s -X POST http://127.0.0.1:8000/api/batches \
     "reagent_name": "测试试剂2",
     "total_quantity": 10,
     "expiry_date": "2027-01-01",
-    "location_code": "C-01"
+    "location_code": "C-01",
+    "username": "alice"
   }' | python -m json.tool
 
 # 放入第 3 个批次（应该失败，容量已满）
@@ -296,7 +304,8 @@ curl -s -X POST http://127.0.0.1:8000/api/batches \
     "reagent_name": "测试试剂3",
     "total_quantity": 10,
     "expiry_date": "2027-01-01",
-    "location_code": "C-01"
+    "location_code": "C-01",
+    "username": "alice"
   }' | python -m json.tool
 ```
 

@@ -48,7 +48,8 @@ class BatchBase(BaseModel):
 
 
 class BatchCreate(BatchBase):
-    pass
+    username: str
+    remark: Optional[str] = None
 
 
 class BatchResponse(BaseModel):

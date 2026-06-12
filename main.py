@@ -11,6 +11,7 @@ import schemas
 
 Base.metadata.create_all(bind=engine)
 
+
 app = FastAPI(
     title="试剂留样交接系统 API",
     description="试剂留样登记、领取、归还、封存、报废全流程管理",
@@ -111,7 +112,6 @@ def audit_log_to_response(log: models.AuditLog) -> schemas.AuditLogResponse:
     )
 
 
-@app.on_event("startup")
 def init_sample_data():
     db = next(get_db())
 
@@ -167,6 +167,9 @@ def init_sample_data():
         db.commit()
 
     db.close()
+
+
+init_sample_data()
 
 
 @app.get("/api/health", summary="健康检查")
@@ -228,6 +231,8 @@ def create_batch(batch_in: schemas.BatchCreate, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(status_code=400, detail=f"批次号 {batch_in.batch_no} 已存在")
 
+    user = get_user_or_404(db, batch_in.username)
+
     location = get_location_or_404(db, batch_in.location_code)
     if location.used >= location.capacity:
         raise HTTPException(
@@ -246,6 +251,16 @@ def create_batch(batch_in: schemas.BatchCreate, db: Session = Depends(get_db)):
     )
     db.add(batch)
     location.used += 1
+    db.flush()
+
+    add_audit_log(
+        db, batch.id, user.id, ACTION_REGISTER,
+        quantity=batch_in.total_quantity,
+        from_status=None,
+        to_status=STATUS_REGISTERED,
+        remark=batch_in.remark
+    )
+
     db.commit()
     db.refresh(batch)
     return batch_to_response(batch)
