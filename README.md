@@ -53,8 +53,8 @@ uvicorn main:app --reload --host 127.0.0.1 --port 8000
 
 | 角色 | 权限 |
 |------|------|
-| `operator` (操作员) | 登记批次、领取留样、归还留样、查看调拨记录 |
-| `reviewer` (复核员) | 所有操作员权限 + 复核封存、报废、冻结/解冻库位、发起批次调拨 |
+| `operator` (操作员) | 登记批次、领取留样、归还留样、查看调拨记录、提交温控巡检记录、查看自己提交的巡检记录 |
+| `reviewer` (复核员) | 所有操作员权限 + 复核封存、报废、冻结/解冻库位、发起批次调拨、配置温控监控、处理温控异常单 |
 
 ### 状态流转
 
@@ -416,3 +416,222 @@ SQLite 数据库文件为 `reagent_sample.db`，位于项目根目录。删除�
 - `user_id`: 操作人ID（必须是 reviewer）
 - `remark`: 调拨备注
 - `created_at`: 调拨时间
+
+### 温控巡检记录 (TemperatureInspection)
+- `id`: 主键
+- `location_id`: 库位ID
+- `user_id`: 巡检人ID（operator 或 reviewer）
+- `temperature`: 巡检温度（°C）
+- `inspection_date`: 巡检日期（YYYY-MM-DD）
+- `remark`: 备注
+- `created_at`: 提交时间
+
+### 温控异常单 (TemperatureAlert)
+- `id`: 主键
+- `location_id`: 库位ID
+- `inspection_id`: 关联巡检记录ID
+- `temperature`: 异常温度
+- `temp_min`: 库位最低温度（快照）
+- `temp_max`: 库位最高温度（快照）
+- `status`: 状态（OPEN / HANDLED）
+- `handler_id`: 处理人ID（必须是 reviewer）
+- `reason`: 原因
+- `disposal`: 处置说明
+- `handled_at`: 处理时间
+- `created_at`: 创建时间
+
+---
+
+## 温控巡检模块
+
+### 完整流程示例
+
+#### 1. 复核员为库位启用温控监控
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/locations/A-01/temp-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "charlie",
+    "monitoring_enabled": true,
+    "temp_min": 2.0,
+    "temp_max": 8.0
+  }' | python -m json.tool
+```
+
+预期结果：`monitoring_enabled` 为 true，`temp_min` 为 2.0，`temp_max` 为 8.0。
+
+#### 2. 操作员提交正常巡检记录
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/locations/A-01/temperature-inspections \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "temperature": 4.5,
+    "inspection_date": "2026-06-13",
+    "remark": "上午巡检，温度正常"
+  }' | python -m json.tool
+```
+
+预期结果：返回巡检记录，温度 4.5°C 在 2~8°C 范围内，不产生异常单。
+
+#### 3. 操作员提交超温巡检记录（自动生成异常单）
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/locations/A-01/temperature-inspections \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "bob",
+    "temperature": 10.5,
+    "inspection_date": "2026-06-13",
+    "remark": "温度偏高"
+  }' | python -m json.tool
+```
+
+预期结果：返回巡检记录，同时系统自动生成一条 OPEN 状态的异常单。
+
+#### 4. 查询异常单
+
+```bash
+curl -s "http://127.0.0.1:8000/api/temperature-alerts?status=OPEN" | python -m json.tool
+```
+
+#### 5. 复核员处理异常单
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/temperature-alerts/1/handle \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "charlie",
+    "reason": "冷柜门未关紧导致温度升高",
+    "disposal": "已关紧柜门，温度已恢复正常，持续观察"
+  }' | python -m json.tool
+```
+
+预期结果：异常单状态变为 HANDLED，记录处理人、原因和处置说明。
+
+#### 6. 查询巡检记录
+
+```bash
+# 按库位查询
+curl -s "http://127.0.0.1:8000/api/locations/A-01/temperature-inspections" | python -m json.tool
+
+# 按日期查询
+curl -s "http://127.0.0.1:8000/api/temperature-inspections?inspection_date=2026-06-13" | python -m json.tool
+
+# 按提交人查询
+curl -s "http://127.0.0.1:8000/api/temperature-inspections?username=alice" | python -m json.tool
+```
+
+#### 7. 导出巡检和异常记录
+
+```bash
+curl -s "http://127.0.0.1:8000/api/export/temperature?location_code=A-01" \
+  -o temperature_export.json
+
+python -m json.tool temperature_export.json
+```
+
+---
+
+### 温控巡检失败路径验证
+
+#### 1. operator 尝试配置温控监控（权限不足）
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/locations/A-01/temp-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "monitoring_enabled": true,
+    "temp_min": 2.0,
+    "temp_max": 8.0
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 403。
+
+#### 2. 未启用监控的库位提交巡检
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/locations/B-01/temperature-inspections \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "temperature": 25.0,
+    "inspection_date": "2026-06-13"
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 400，提示库位未启用温控监控。
+
+#### 3. 温度格式非法
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/locations/A-01/temperature-inspections \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "temperature": "abc",
+    "inspection_date": "2026-06-13"
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 422，校验失败。
+
+#### 4. 同一用户同日对同一库位重复巡检
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/locations/A-01/temperature-inspections \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "temperature": 5.0,
+    "inspection_date": "2026-06-13"
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 409，冲突。
+
+#### 5. operator 尝试处理异常单（权限不足）
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/temperature-alerts/1/handle \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "reason": "测试",
+    "disposal": "测试"
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 403。
+
+#### 6. 启用监控但未设置温度范围
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/locations/A-01/temp-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "charlie",
+    "monitoring_enabled": true
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 400，提示必须设置温度范围。
+
+#### 7. 最低温度 >= 最高温度
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/locations/A-01/temp-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "charlie",
+    "monitoring_enabled": true,
+    "temp_min": 8.0,
+    "temp_max": 2.0
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 400，提示最低温度必须小于最高温度。

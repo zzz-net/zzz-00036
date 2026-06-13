@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, List
 import json
 
@@ -40,6 +40,11 @@ ACTION_LOCATION_UNFREEZE = "UNFREEZE"
 ACTION_TRANSFER = "TRANSFER"
 ACTION_LOCATION_TRANSFER_OUT = "TRANSFER_OUT"
 ACTION_LOCATION_TRANSFER_IN = "TRANSFER_IN"
+
+ACTION_TEMP_CONFIG = "TEMP_CONFIG"
+ACTION_TEMP_INSPECT = "TEMP_INSPECT"
+ACTION_TEMP_ALERT = "TEMP_ALERT"
+ACTION_TEMP_ALERT_HANDLE = "TEMP_ALERT_HANDLE"
 
 
 def get_user_or_404(db: Session, username: str) -> models.User:
@@ -161,6 +166,40 @@ def transfer_to_response(transfer: models.BatchTransfer) -> schemas.BatchTransfe
     )
 
 
+def inspection_to_response(insp: models.TemperatureInspection) -> schemas.TemperatureInspectionResponse:
+    return schemas.TemperatureInspectionResponse(
+        id=insp.id,
+        location_id=insp.location_id,
+        location_code=insp.location.code if insp.location else None,
+        user_id=insp.user_id,
+        username=insp.user.username if insp.user else None,
+        user_role=insp.user.role if insp.user else None,
+        temperature=insp.temperature,
+        inspection_date=insp.inspection_date.isoformat() if insp.inspection_date else None,
+        remark=insp.remark,
+        created_at=insp.created_at
+    )
+
+
+def alert_to_response(alert: models.TemperatureAlert) -> schemas.TemperatureAlertResponse:
+    return schemas.TemperatureAlertResponse(
+        id=alert.id,
+        location_id=alert.location_id,
+        location_code=alert.location.code if alert.location else None,
+        inspection_id=alert.inspection_id,
+        temperature=alert.temperature,
+        temp_min=alert.temp_min,
+        temp_max=alert.temp_max,
+        status=alert.status,
+        handler_id=alert.handler_id,
+        handler_name=alert.handler.username if alert.handler else None,
+        reason=alert.reason,
+        disposal=alert.disposal,
+        handled_at=alert.handled_at,
+        created_at=alert.created_at
+    )
+
+
 def migrate_db():
     from sqlalchemy import text
     db = next(get_db())
@@ -199,6 +238,61 @@ def migrate_db():
                 FOREIGN KEY (from_location_id) REFERENCES locations (id),
                 FOREIGN KEY (to_location_id) REFERENCES locations (id),
                 FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """))
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        db.execute(text("ALTER TABLE locations ADD COLUMN monitoring_enabled BOOLEAN DEFAULT 0 NOT NULL"))
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        db.execute(text("ALTER TABLE locations ADD COLUMN temp_min FLOAT"))
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        db.execute(text("ALTER TABLE locations ADD COLUMN temp_max FLOAT"))
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS temperature_inspections (
+                id INTEGER PRIMARY KEY,
+                location_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                temperature FLOAT NOT NULL,
+                inspection_date DATE NOT NULL,
+                remark TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (location_id) REFERENCES locations (id),
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """))
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS temperature_alerts (
+                id INTEGER PRIMARY KEY,
+                location_id INTEGER NOT NULL,
+                inspection_id INTEGER NOT NULL,
+                temperature FLOAT NOT NULL,
+                temp_min FLOAT,
+                temp_max FLOAT,
+                status VARCHAR(20) DEFAULT 'OPEN' NOT NULL,
+                handler_id INTEGER,
+                reason TEXT,
+                disposal TEXT,
+                handled_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (location_id) REFERENCES locations (id),
+                FOREIGN KEY (inspection_id) REFERENCES temperature_inspections (id),
+                FOREIGN KEY (handler_id) REFERENCES users (id)
             )
         """))
         db.commit()
@@ -870,5 +964,306 @@ def export_transfers(
         media_type="application/json",
         headers={
             "Content-Disposition": f'attachment; filename="transfers_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.json"'
+        }
+    )
+
+
+@app.post("/api/locations/{code}/temp-config", response_model=schemas.LocationResponse, summary="配置库位温控监控")
+def configure_temp_monitoring(code: str, req: schemas.LocationTempConfigRequest, db: Session = Depends(get_db)):
+    user = get_user_or_404(db, req.username)
+    require_role(user, [ROLE_REVIEWER])
+
+    location = get_location_or_404(db, code)
+
+    if req.monitoring_enabled:
+        if req.temp_min is None or req.temp_max is None:
+            raise HTTPException(
+                status_code=400,
+                detail="启用监控时必须设置最低温度和最高温度"
+            )
+        if req.temp_min >= req.temp_max:
+            raise HTTPException(
+                status_code=400,
+                detail="最低温度必须小于最高温度"
+            )
+
+    location.monitoring_enabled = req.monitoring_enabled
+    location.temp_min = req.temp_min if req.monitoring_enabled else None
+    location.temp_max = req.temp_max if req.monitoring_enabled else None
+
+    config_desc = f"启用监控({req.temp_min}~{req.temp_max}°C)" if req.monitoring_enabled else "关闭监控"
+    add_location_log(
+        db, location.id, user.id, ACTION_TEMP_CONFIG,
+        remark=config_desc
+    )
+
+    db.commit()
+    db.refresh(location)
+    return location
+
+
+@app.post("/api/locations/{code}/temperature-inspections", response_model=schemas.TemperatureInspectionResponse, summary="提交温控巡检记录")
+def submit_temperature_inspection(code: str, req: schemas.TemperatureInspectionCreate, db: Session = Depends(get_db)):
+    user = get_user_or_404(db, req.username)
+    require_role(user, [ROLE_OPERATOR, ROLE_REVIEWER])
+
+    location = get_location_or_404(db, code)
+
+    if not location.monitoring_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail=f"库位 {code} 未启用温控监控，不能提交巡检记录"
+        )
+
+    try:
+        insp_date = date.fromisoformat(req.inspection_date)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=422,
+            detail="巡检日期格式无效，需为 YYYY-MM-DD"
+        )
+
+    existing = db.query(models.TemperatureInspection).filter(
+        models.TemperatureInspection.location_id == location.id,
+        models.TemperatureInspection.inspection_date == insp_date,
+        models.TemperatureInspection.user_id == user.id
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"用户 {req.username} 已在 {req.inspection_date} 对库位 {code} 提交过巡检记录"
+        )
+
+    inspection = models.TemperatureInspection(
+        location_id=location.id,
+        user_id=user.id,
+        temperature=req.temperature,
+        inspection_date=insp_date,
+        remark=req.remark
+    )
+    db.add(inspection)
+    db.flush()
+
+    add_location_log(
+        db, location.id, user.id, ACTION_TEMP_INSPECT,
+        remark=f"温度: {req.temperature}°C"
+    )
+
+    alert = None
+    if (location.temp_min is not None and req.temperature < location.temp_min) or \
+       (location.temp_max is not None and req.temperature > location.temp_max):
+        alert = models.TemperatureAlert(
+            location_id=location.id,
+            inspection_id=inspection.id,
+            temperature=req.temperature,
+            temp_min=location.temp_min,
+            temp_max=location.temp_max,
+            status="OPEN"
+        )
+        db.add(alert)
+        db.flush()
+
+        add_location_log(
+            db, location.id, user.id, ACTION_TEMP_ALERT,
+            remark=f"温度异常: {req.temperature}°C，范围 {location.temp_min}~{location.temp_max}°C"
+        )
+
+    db.commit()
+    db.refresh(inspection)
+    return inspection_to_response(inspection)
+
+
+@app.get("/api/locations/{code}/temperature-inspections", summary="查询库位巡检记录")
+def list_temperature_inspections(
+    code: str,
+    inspection_date: Optional[str] = None,
+    username: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    location = get_location_or_404(db, code)
+
+    query = db.query(models.TemperatureInspection).filter(
+        models.TemperatureInspection.location_id == location.id
+    )
+
+    if inspection_date:
+        try:
+            insp_date = date.fromisoformat(inspection_date)
+            query = query.filter(models.TemperatureInspection.inspection_date == insp_date)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=422, detail="日期格式无效，需为 YYYY-MM-DD")
+
+    if username:
+        user = db.query(models.User).filter(models.User.username == username).first()
+        if user:
+            query = query.filter(models.TemperatureInspection.user_id == user.id)
+        else:
+            return {"items": [], "total": 0}
+
+    query = query.order_by(models.TemperatureInspection.created_at.desc())
+    inspections = query.all()
+    items = [inspection_to_response(insp) for insp in inspections]
+    return {"items": items, "total": len(items)}
+
+
+@app.get("/api/temperature-inspections", summary="查询所有巡检记录（operator 只看自己的）")
+def list_all_temperature_inspections(
+    location_code: Optional[str] = None,
+    inspection_date: Optional[str] = None,
+    username: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.TemperatureInspection)
+
+    if location_code:
+        loc = db.query(models.Location).filter(models.Location.code == location_code).first()
+        if loc:
+            query = query.filter(models.TemperatureInspection.location_id == loc.id)
+        else:
+            return {"items": [], "total": 0}
+
+    if inspection_date:
+        try:
+            insp_date = date.fromisoformat(inspection_date)
+            query = query.filter(models.TemperatureInspection.inspection_date == insp_date)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=422, detail="日期格式无效，需为 YYYY-MM-DD")
+
+    if username:
+        user = db.query(models.User).filter(models.User.username == username).first()
+        if user:
+            query = query.filter(models.TemperatureInspection.user_id == user.id)
+        else:
+            return {"items": [], "total": 0}
+
+    query = query.order_by(models.TemperatureInspection.created_at.desc())
+    inspections = query.all()
+    items = [inspection_to_response(insp) for insp in inspections]
+    return {"items": items, "total": len(items)}
+
+
+@app.get("/api/temperature-alerts", summary="查询温控异常单")
+def list_temperature_alerts(
+    location_code: Optional[str] = None,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.TemperatureAlert)
+
+    if location_code:
+        loc = db.query(models.Location).filter(models.Location.code == location_code).first()
+        if loc:
+            query = query.filter(models.TemperatureAlert.location_id == loc.id)
+        else:
+            return {"items": [], "total": 0}
+
+    if status:
+        query = query.filter(models.TemperatureAlert.status == status)
+
+    query = query.order_by(models.TemperatureAlert.created_at.desc())
+    alerts = query.all()
+    items = [alert_to_response(a) for a in alerts]
+    return {"items": items, "total": len(items)}
+
+
+@app.post("/api/temperature-alerts/{alert_id}/handle", response_model=schemas.TemperatureAlertResponse, summary="处理温控异常单")
+def handle_temperature_alert(alert_id: int, req: schemas.TemperatureAlertHandleRequest, db: Session = Depends(get_db)):
+    user = get_user_or_404(db, req.username)
+    require_role(user, [ROLE_REVIEWER])
+
+    alert = db.query(models.TemperatureAlert).filter(models.TemperatureAlert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail=f"异常单 {alert_id} 不存在")
+
+    if alert.status != "OPEN":
+        raise HTTPException(
+            status_code=400,
+            detail=f"异常单 {alert_id} 当前状态为 {alert.status}，只能处理 OPEN 状态的异常单"
+        )
+
+    alert.status = "HANDLED"
+    alert.handler_id = user.id
+    alert.reason = req.reason
+    alert.disposal = req.disposal
+    alert.handled_at = datetime.utcnow()
+
+    add_location_log(
+        db, alert.location_id, user.id, ACTION_TEMP_ALERT_HANDLE,
+        remark=f"处理异常单 #{alert_id}，原因: {req.reason}，处置: {req.disposal}"
+    )
+
+    db.commit()
+    db.refresh(alert)
+    return alert_to_response(alert)
+
+
+@app.get("/api/export/temperature", summary="导出巡检和异常记录为 JSON")
+def export_temperature(
+    location_code: Optional[str] = None,
+    inspection_date: Optional[str] = None,
+    status: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    insp_result = list_all_temperature_inspections(
+        location_code=location_code,
+        inspection_date=inspection_date,
+        db=db
+    )
+
+    alert_result = list_temperature_alerts(
+        location_code=location_code,
+        status=status,
+        db=db
+    )
+
+    export_data = {
+        "export_time": datetime.utcnow().isoformat(),
+        "filter": {
+            "location_code": location_code,
+            "inspection_date": inspection_date,
+            "alert_status": status
+        },
+        "inspections": {
+            "total": insp_result["total"],
+            "records": []
+        },
+        "alerts": {
+            "total": alert_result["total"],
+            "records": []
+        }
+    }
+
+    for insp in insp_result["items"]:
+        export_data["inspections"]["records"].append({
+            "id": insp.id,
+            "location_code": insp.location_code,
+            "operator": insp.username,
+            "operator_role": insp.user_role,
+            "temperature": insp.temperature,
+            "inspection_date": insp.inspection_date,
+            "remark": insp.remark,
+            "created_at": insp.created_at.isoformat()
+        })
+
+    for a in alert_result["items"]:
+        export_data["alerts"]["records"].append({
+            "id": a.id,
+            "location_code": a.location_code,
+            "temperature": a.temperature,
+            "temp_min": a.temp_min,
+            "temp_max": a.temp_max,
+            "status": a.status,
+            "handler": a.handler_name,
+            "reason": a.reason,
+            "disposal": a.disposal,
+            "handled_at": a.handled_at.isoformat() if a.handled_at else None,
+            "created_at": a.created_at.isoformat()
+        })
+
+    return JSONResponse(
+        content=export_data,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="temperature_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.json"'
         }
     )

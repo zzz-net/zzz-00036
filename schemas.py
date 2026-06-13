@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from datetime import datetime
+from pydantic import BaseModel, Field, field_validator
+from datetime import datetime, date
 from typing import Optional, List
 
 
@@ -17,6 +17,9 @@ class LocationResponse(LocationBase):
     id: int
     used: int
     frozen: bool
+    monitoring_enabled: bool = False
+    temp_min: Optional[float] = None
+    temp_max: Optional[float] = None
     created_at: datetime
 
     class Config:
@@ -160,3 +163,93 @@ class BatchTransferResponse(BaseModel):
 class BatchTransferListResponse(BaseModel):
     items: List[BatchTransferResponse]
     total: int
+
+
+class LocationTempConfigRequest(BaseModel):
+    username: str
+    monitoring_enabled: bool
+    temp_min: Optional[float] = None
+    temp_max: Optional[float] = None
+
+    @field_validator("temp_min", "temp_max", mode="before")
+    @classmethod
+    def validate_temp_not_nan(cls, v):
+        if v is not None:
+            try:
+                v = float(v)
+            except (ValueError, TypeError):
+                raise ValueError("温度值必须是有效数字")
+            if v != v:
+                raise ValueError("温度值不能为 NaN")
+        return v
+
+
+class TemperatureInspectionCreate(BaseModel):
+    username: str
+    temperature: float
+    inspection_date: str
+    remark: Optional[str] = None
+
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def validate_temperature(cls, v):
+        try:
+            v = float(v)
+        except (ValueError, TypeError):
+            raise ValueError("温度值必须是有效数字")
+        if v != v:
+            raise ValueError("温度值不能为 NaN")
+        if v < -273.15:
+            raise ValueError("温度值不能低于绝对零度 (-273.15°C)")
+        return v
+
+    @field_validator("inspection_date", mode="before")
+    @classmethod
+    def validate_inspection_date(cls, v):
+        try:
+            date.fromisoformat(v)
+        except (ValueError, TypeError):
+            raise ValueError("巡检日期格式无效，需为 YYYY-MM-DD")
+        return v
+
+
+class TemperatureInspectionResponse(BaseModel):
+    id: int
+    location_id: int
+    location_code: Optional[str] = None
+    user_id: int
+    username: Optional[str] = None
+    user_role: Optional[str] = None
+    temperature: float
+    inspection_date: str
+    remark: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TemperatureAlertResponse(BaseModel):
+    id: int
+    location_id: int
+    location_code: Optional[str] = None
+    inspection_id: int
+    temperature: float
+    temp_min: Optional[float] = None
+    temp_max: Optional[float] = None
+    status: str
+    handler_id: Optional[int] = None
+    handler_name: Optional[str] = None
+    reason: Optional[str] = None
+    disposal: Optional[str] = None
+    handled_at: Optional[datetime] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TemperatureAlertHandleRequest(BaseModel):
+    username: str
+    reason: str = Field(min_length=1)
+    disposal: str = Field(min_length=1)

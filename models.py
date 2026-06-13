@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean, Float, Date
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -15,6 +15,8 @@ class User(Base):
     audit_logs = relationship("AuditLog", back_populates="user")
     location_logs = relationship("LocationLog", back_populates="user")
     transfers = relationship("BatchTransfer", back_populates="user")
+    temperature_inspections = relationship("TemperatureInspection", back_populates="user")
+    temperature_alerts_handled = relationship("TemperatureAlert", foreign_keys="TemperatureAlert.handler_id", back_populates="handler")
 
 
 class Location(Base):
@@ -26,12 +28,17 @@ class Location(Base):
     capacity = Column(Integer, nullable=False)
     used = Column(Integer, default=0)
     frozen = Column(Boolean, default=False, nullable=False)
+    monitoring_enabled = Column(Boolean, default=False, nullable=False)
+    temp_min = Column(Float, nullable=True)
+    temp_max = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     batches = relationship("Batch", back_populates="location")
     location_logs = relationship("LocationLog", back_populates="location")
     transfers_from = relationship("BatchTransfer", foreign_keys="BatchTransfer.from_location_id", back_populates="from_location")
     transfers_to = relationship("BatchTransfer", foreign_keys="BatchTransfer.to_location_id", back_populates="to_location")
+    temperature_inspections = relationship("TemperatureInspection", back_populates="location")
+    temperature_alerts = relationship("TemperatureAlert", back_populates="location")
 
 
 class Batch(Base):
@@ -99,3 +106,39 @@ class BatchTransfer(Base):
     from_location = relationship("Location", foreign_keys=[from_location_id], back_populates="transfers_from")
     to_location = relationship("Location", foreign_keys=[to_location_id], back_populates="transfers_to")
     user = relationship("User", back_populates="transfers")
+
+
+class TemperatureInspection(Base):
+    __tablename__ = "temperature_inspections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    temperature = Column(Float, nullable=False)
+    inspection_date = Column(Date, nullable=False)
+    remark = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    location = relationship("Location", back_populates="temperature_inspections")
+    user = relationship("User", back_populates="temperature_inspections")
+
+
+class TemperatureAlert(Base):
+    __tablename__ = "temperature_alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    inspection_id = Column(Integer, ForeignKey("temperature_inspections.id"), nullable=False)
+    temperature = Column(Float, nullable=False)
+    temp_min = Column(Float, nullable=True)
+    temp_max = Column(Float, nullable=True)
+    status = Column(String(20), default="OPEN", nullable=False)
+    handler_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    reason = Column(Text, nullable=True)
+    disposal = Column(Text, nullable=True)
+    handled_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    location = relationship("Location", back_populates="temperature_alerts")
+    inspection = relationship("TemperatureInspection")
+    handler = relationship("User", foreign_keys=[handler_id], back_populates="temperature_alerts_handled")

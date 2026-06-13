@@ -607,6 +607,275 @@ def run_phase1():
     with open("transfer_locations_before_restart.json", "w", encoding="utf-8") as f:
         json.dump(transfer_loc_state, f, ensure_ascii=False, indent=2)
 
+    section("21. 温控巡检 - reviewer 配置库位温控监控")
+    resp = requests.post(f"{BASE}/api/locations/A-01/temp-config", json={
+        "username": "charlie",
+        "monitoring_enabled": True,
+        "temp_min": 2.0,
+        "temp_max": 8.0
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 200", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+    check("monitoring_enabled 为 True", d.get("monitoring_enabled") == True, f"实际: {d.get('monitoring_enabled')}")
+    check("temp_min 为 2.0", d.get("temp_min") == 2.0, f"实际: {d.get('temp_min')}")
+    check("temp_max 为 8.0", d.get("temp_max") == 8.0, f"实际: {d.get('temp_max')}")
+
+    section("21.1 温控配置写入库位日志")
+    resp = requests.get(f"{BASE}/api/location-logs", params={"location_code": "A-01", "action": "TEMP_CONFIG"})
+    d = resp.json()
+    check("存在 TEMP_CONFIG 日志", d["total"] >= 1, f"实际: {d['total']}")
+    if d["items"]:
+        log = d["items"][0]
+        check("TEMP_CONFIG 操作人是 charlie", log["username"] == "charlie")
+        check("TEMP_CONFIG 操作人角色是 reviewer", log["user_role"] == "reviewer")
+        check("TEMP_CONFIG 备注含 '启用'", "启用" in (log.get("remark") or ""))
+
+    section("22. 温控巡检 - operator 提交正常巡检记录")
+    resp = requests.post(f"{BASE}/api/locations/A-01/temperature-inspections", json={
+        "username": "alice",
+        "temperature": 4.5,
+        "inspection_date": "2026-06-13",
+        "remark": "上午巡检，温度正常"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 200", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+    check("temperature 为 4.5", d.get("temperature") == 4.5, f"实际: {d.get('temperature')}")
+    check("location_code 为 A-01", d.get("location_code") == "A-01")
+    check("username 为 alice", d.get("username") == "alice")
+    check("user_role 为 operator", d.get("user_role") == "operator")
+    check("inspection_date 为 2026-06-13", d.get("inspection_date") == "2026-06-13")
+    check("remark 正确", d.get("remark") == "上午巡检，温度正常")
+    normal_insp_id = d.get("id")
+
+    section("22.1 正常巡检写入库位日志")
+    resp = requests.get(f"{BASE}/api/location-logs", params={"location_code": "A-01", "action": "TEMP_INSPECT"})
+    d = resp.json()
+    check("存在 TEMP_INSPECT 日志", d["total"] >= 1, f"实际: {d['total']}")
+    if d["items"]:
+        log = d["items"][0]
+        check("TEMP_INSPECT 备注含温度", "4.5" in (log.get("remark") or ""))
+
+    section("23. 温控巡检 - 超温巡检自动生成异常单")
+    resp = requests.post(f"{BASE}/api/locations/A-01/temperature-inspections", json={
+        "username": "bob",
+        "temperature": 10.5,
+        "inspection_date": "2026-06-13",
+        "remark": "温度偏高"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 200", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+    check("temperature 为 10.5", d.get("temperature") == 10.5)
+    check("username 为 bob", d.get("username") == "bob")
+    overtemp_insp_id = d.get("id")
+
+    section("23.1 超温后异常单已自动生成")
+    resp = requests.get(f"{BASE}/api/temperature-alerts", params={"location_code": "A-01", "status": "OPEN"})
+    d = resp.json()
+    print(f"  OPEN 异常单数: {d['total']}")
+    check("存在至少 1 条 OPEN 异常单", d["total"] >= 1, f"实际: {d['total']}")
+    if d["items"]:
+        alert = d["items"][0]
+        check("异常单温度为 10.5", alert["temperature"] == 10.5)
+        check("异常单 temp_min 为 2.0", alert["temp_min"] == 2.0)
+        check("异常单 temp_max 为 8.0", alert["temp_max"] == 8.0)
+        check("异常单状态为 OPEN", alert["status"] == "OPEN")
+        check("异常单 location_code 为 A-01", alert["location_code"] == "A-01")
+        alert_id = alert["id"]
+    else:
+        alert_id = None
+
+    section("23.2 超温巡检写入 TEMP_INSPECT 和 TEMP_ALERT 日志")
+    resp = requests.get(f"{BASE}/api/location-logs", params={"location_code": "A-01", "action": "TEMP_ALERT"})
+    d = resp.json()
+    check("存在 TEMP_ALERT 日志", d["total"] >= 1, f"实际: {d['total']}")
+    if d["items"]:
+        log = d["items"][0]
+        check("TEMP_ALERT 备注含 '异常'", "异常" in (log.get("remark") or ""))
+
+    section("24. 温控巡检 - reviewer 处理异常单")
+    if alert_id:
+        resp = requests.post(f"{BASE}/api/temperature-alerts/{alert_id}/handle", json={
+            "username": "charlie",
+            "reason": "冷柜门未关紧导致温度升高",
+            "disposal": "已关紧柜门，温度已恢复正常"
+        })
+        d = resp.json()
+        print(f"  HTTP {resp.status_code}")
+        check("状态码 200", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+        check("状态变为 HANDLED", d.get("status") == "HANDLED", f"实际: {d.get('status')}")
+        check("handler_name 为 charlie", d.get("handler_name") == "charlie")
+        check("reason 正确", d.get("reason") == "冷柜门未关紧导致温度升高")
+        check("disposal 正确", d.get("disposal") == "已关紧柜门，温度已恢复正常")
+        check("handled_at 非空", d.get("handled_at") is not None)
+    else:
+        check("跳过异常单处理（无 OPEN 异常单）", False, "前置步骤未产生异常单")
+
+    section("24.1 异常处理写入库位日志")
+    resp = requests.get(f"{BASE}/api/location-logs", params={"location_code": "A-01", "action": "TEMP_ALERT_HANDLE"})
+    d = resp.json()
+    check("存在 TEMP_ALERT_HANDLE 日志", d["total"] >= 1, f"实际: {d['total']}")
+    if d["items"]:
+        log = d["items"][0]
+        check("TEMP_ALERT_HANDLE 操作人是 charlie", log["username"] == "charlie")
+        check("TEMP_ALERT_HANDLE 备注含 '处置'", "处置" in (log.get("remark") or ""))
+
+    section("25. 温控巡检 - 查询巡检记录")
+    resp = requests.get(f"{BASE}/api/locations/A-01/temperature-inspections")
+    d = resp.json()
+    print(f"  A-01 巡检记录数: {d['total']}")
+    check("至少有 2 条巡检记录", d["total"] >= 2, f"实际: {d['total']}")
+
+    section("25.1 按日期查询巡检记录")
+    resp = requests.get(f"{BASE}/api/temperature-inspections", params={"inspection_date": "2026-06-13"})
+    d = resp.json()
+    print(f"  2026-06-13 巡检记录数: {d['total']}")
+    check("至少有 2 条记录", d["total"] >= 2, f"实际: {d['total']}")
+
+    section("25.2 按提交人查询巡检记录")
+    resp = requests.get(f"{BASE}/api/temperature-inspections", params={"username": "alice"})
+    d = resp.json()
+    print(f"  alice 的巡检记录数: {d['total']}")
+    check("alice 至少 1 条巡检记录", d["total"] >= 1, f"实际: {d['total']}")
+    if d["items"]:
+        check("alice 的记录都来自 alice", all(item["username"] == "alice" for item in d["items"]))
+
+    section("26. 温控巡检 - 导出巡检和异常记录")
+    resp = requests.get(f"{BASE}/api/export/temperature", params={"location_code": "A-01"})
+    export_data = resp.json()
+    print(f"  巡检记录数: {export_data['inspections']['total']}, 异常单数: {export_data['alerts']['total']}")
+    check("导出有 inspections 字段", "inspections" in export_data)
+    check("导出有 alerts 字段", "alerts" in export_data)
+    check("导出巡检记录数 >= 2", export_data["inspections"]["total"] >= 2, f"实际: {export_data['inspections']['total']}")
+    check("导出异常单数 >= 1", export_data["alerts"]["total"] >= 1, f"实际: {export_data['alerts']['total']}")
+    check("导出巡检每条有 operator", all(r.get("operator") for r in export_data["inspections"]["records"]))
+    check("导出巡检每条有 temperature", all(r.get("temperature") is not None for r in export_data["inspections"]["records"]))
+    check("导出异常单有 status 字段", all(r.get("status") for r in export_data["alerts"]["records"]))
+
+    with open("temperature_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(export_data, f, ensure_ascii=False, indent=2)
+    print("  已保存 temperature_before_restart.json")
+
+    section("27. 温控巡检 - 失败路径：operator 配置监控（权限不足）")
+    resp = requests.post(f"{BASE}/api/locations/A-01/temp-config", json={
+        "username": "alice",
+        "monitoring_enabled": True,
+        "temp_min": 2.0,
+        "temp_max": 8.0
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 403", resp.status_code == 403, f"实际: {resp.status_code}")
+    check("错误信息含 '权限'", "权限" in d.get("detail", ""))
+
+    section("27.1 验证配置未改变")
+    resp = requests.get(f"{BASE}/api/locations/A-01")
+    loc_check = resp.json()
+    check("temp_min 仍为 2.0", loc_check["temp_min"] == 2.0, f"实际: {loc_check['temp_min']}")
+    check("temp_max 仍为 8.0", loc_check["temp_max"] == 8.0, f"实际: {loc_check['temp_max']}")
+
+    section("28. 温控巡检 - 失败路径：未启用监控的库位提交巡检")
+    resp = requests.get(f"{BASE}/api/locations/B-01")
+    b01_loc = resp.json()
+    print(f"  B-01 monitoring_enabled={b01_loc.get('monitoring_enabled')}")
+    resp = requests.post(f"{BASE}/api/locations/B-01/temperature-inspections", json={
+        "username": "alice",
+        "temperature": 25.0,
+        "inspection_date": "2026-06-13"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '未启用'", "未启用" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("29. 温控巡检 - 失败路径：温度格式非法")
+    resp = requests.post(f"{BASE}/api/locations/A-01/temperature-inspections", json={
+        "username": "alice",
+        "temperature": "abc",
+        "inspection_date": "2026-06-13"
+    })
+    print(f"  HTTP {resp.status_code}")
+    check("温度非法返回 422", resp.status_code == 422, f"实际: {resp.status_code}")
+
+    section("30. 温控巡检 - 失败路径：重复巡检（同用户同库位同日期）")
+    resp = requests.post(f"{BASE}/api/locations/A-01/temperature-inspections", json={
+        "username": "alice",
+        "temperature": 5.0,
+        "inspection_date": "2026-06-13"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 409", resp.status_code == 409, f"实际: {resp.status_code}")
+    check("错误信息含 '重复' 或 '已'", "已" in d.get("detail", "") or "重复" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("31. 温控巡检 - 失败路径：operator 处理异常单（权限不足）")
+    if alert_id:
+        resp = requests.post(f"{BASE}/api/temperature-alerts/{alert_id}/handle", json={
+            "username": "alice",
+            "reason": "越权测试",
+            "disposal": "越权测试"
+        })
+        d = resp.json()
+        print(f"  HTTP {resp.status_code}")
+        check("状态码 403", resp.status_code == 403, f"实际: {resp.status_code}")
+        check("错误信息含 '权限'", "权限" in d.get("detail", ""))
+    else:
+        check("跳过（无异常单）", False, "前置步骤未产生异常单")
+
+    section("32. 温控巡检 - 失败路径：启用监控但未设温度范围")
+    resp = requests.get(f"{BASE}/api/locations/B-01")
+    b01_check = resp.json()
+    resp = requests.post(f"{BASE}/api/locations/B-01/temp-config", json={
+        "username": "charlie",
+        "monitoring_enabled": True
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '必须设置'", "必须设置" in d.get("detail", "") or "最低温度" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("32.1 失败后 B-01 监控状态未改变")
+    resp = requests.get(f"{BASE}/api/locations/B-01")
+    b01_after = resp.json()
+    check("B-01 monitoring_enabled 未变", b01_after["monitoring_enabled"] == b01_check["monitoring_enabled"])
+
+    section("33. 温控巡检 - 失败路径：最低温度 >= 最高温度")
+    resp = requests.post(f"{BASE}/api/locations/A-01/temp-config", json={
+        "username": "charlie",
+        "monitoring_enabled": True,
+        "temp_min": 8.0,
+        "temp_max": 2.0
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '小于'", "小于" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("34. 温控巡检 - 失败路径：已处理的异常单不能再次处理")
+    if alert_id:
+        resp = requests.post(f"{BASE}/api/temperature-alerts/{alert_id}/handle", json={
+            "username": "charlie",
+            "reason": "再次处理",
+            "disposal": "再次处理"
+        })
+        d = resp.json()
+        print(f"  HTTP {resp.status_code}")
+        check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+        check("错误信息含 'OPEN'", "OPEN" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("35. 温控巡检 - 保存重启前状态")
+    resp = requests.get(f"{BASE}/api/locations/A-01")
+    temp_loc_before = resp.json()
+    with open("temp_location_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(temp_loc_before, f, ensure_ascii=False, indent=2)
+
+    resp = requests.get(f"{BASE}/api/temperature-alerts", params={"location_code": "A-01"})
+    temp_alerts_before = resp.json()
+    with open("temp_alerts_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(temp_alerts_before, f, ensure_ascii=False, indent=2)
+
     section("15. 记录重启前状态（用于重启后比对）")
     resp = requests.get(f"{BASE}/api/batches/REG-TEST-001")
     before = resp.json()
@@ -794,12 +1063,76 @@ def run_restart_checks():
     a01_in = [log for log in d["items"] if log["action"] == "TRANSFER_IN"]
     check("A-01 TRANSFER_IN 日志仍存在", len(a01_in) >= 1)
 
+    section("27. 重启后 - 温控监控配置一致")
+    with open("temp_location_before_restart.json", "r", encoding="utf-8") as f:
+        temp_loc_before = json.load(f)
+    resp = requests.get(f"{BASE}/api/locations/A-01")
+    temp_loc_after = resp.json()
+    print(f"  重启前: monitoring_enabled={temp_loc_before['monitoring_enabled']}, temp_min={temp_loc_before.get('temp_min')}, temp_max={temp_loc_before.get('temp_max')}")
+    print(f"  重启后: monitoring_enabled={temp_loc_after['monitoring_enabled']}, temp_min={temp_loc_after.get('temp_min')}, temp_max={temp_loc_after.get('temp_max')}")
+    check("monitoring_enabled 一致", temp_loc_before["monitoring_enabled"] == temp_loc_after["monitoring_enabled"])
+    check("temp_min 一致", temp_loc_before["temp_min"] == temp_loc_after["temp_min"])
+    check("temp_max 一致", temp_loc_before["temp_max"] == temp_loc_after["temp_max"])
+
+    section("28. 重启后 - 巡检记录一致")
+    resp = requests.get(f"{BASE}/api/locations/A-01/temperature-inspections")
+    d = resp.json()
+    print(f"  巡检记录数: {d['total']}")
+    check("巡检记录数 >= 2", d["total"] >= 2, f"实际: {d['total']}")
+    temps = [insp["temperature"] for insp in d["items"]]
+    print(f"  温度列表: {temps}")
+    check("巡检包含 4.5°C 记录", 4.5 in temps, f"实际: {temps}")
+    check("巡检包含 10.5°C 记录", 10.5 in temps, f"实际: {temps}")
+
+    section("29. 重启后 - 异常单处理状态一致")
+    with open("temp_alerts_before_restart.json", "r", encoding="utf-8") as f:
+        temp_alerts_before = json.load(f)
+    resp = requests.get(f"{BASE}/api/temperature-alerts", params={"location_code": "A-01"})
+    temp_alerts_after = resp.json()
+    print(f"  重启前异常单数: {temp_alerts_before['total']}, 重启后: {temp_alerts_after['total']}")
+    check("异常单数一致", temp_alerts_before["total"] == temp_alerts_after["total"], f"重启前: {temp_alerts_before['total']}, 重启后: {temp_alerts_after['total']}")
+    before_statuses = sorted([a["status"] for a in temp_alerts_before["items"]])
+    after_statuses = sorted([a["status"] for a in temp_alerts_after["items"]])
+    check("异常单状态列表一致", before_statuses == after_statuses, f"重启前: {before_statuses}, 重启后: {after_statuses}")
+
+    handled_alerts = [a for a in temp_alerts_after["items"] if a["status"] == "HANDLED"]
+    if handled_alerts:
+        ha = handled_alerts[0]
+        check("已处理异常单有 handler_name", ha.get("handler_name") is not None)
+        check("已处理异常单有 reason", ha.get("reason") is not None)
+        check("已处理异常单有 disposal", ha.get("disposal") is not None)
+        check("已处理异常单有 handled_at", ha.get("handled_at") is not None)
+
+    section("30. 重启后 - 温控巡检导出一致")
+    with open("temperature_before_restart.json", "r", encoding="utf-8") as f:
+        temp_export_before = json.load(f)
+    resp = requests.get(f"{BASE}/api/export/temperature", params={"location_code": "A-01"})
+    temp_export_after = resp.json()
+    print(f"  重启前巡检导出: {temp_export_before['inspections']['total']}, 重启后: {temp_export_after['inspections']['total']}")
+    check("导出巡检记录数一致", temp_export_before["inspections"]["total"] == temp_export_after["inspections"]["total"])
+    check("导出异常单数一致", temp_export_before["alerts"]["total"] == temp_export_after["alerts"]["total"])
+    before_insp_temps = sorted([r["temperature"] for r in temp_export_before["inspections"]["records"]])
+    after_insp_temps = sorted([r["temperature"] for r in temp_export_after["inspections"]["records"]])
+    check("导出巡检温度列表一致", before_insp_temps == after_insp_temps, f"重启前: {before_insp_temps}, 重启后: {after_insp_temps}")
+
+    section("31. 重启后 - 温控库位日志一致")
+    resp = requests.get(f"{BASE}/api/location-logs", params={"location_code": "A-01"})
+    d = resp.json()
+    temp_actions = [log["action"] for log in d["items"] if log["action"].startswith("TEMP_")]
+    print(f"  温控相关日志动作: {temp_actions}")
+    check("包含 TEMP_CONFIG", "TEMP_CONFIG" in temp_actions)
+    check("包含 TEMP_INSPECT", "TEMP_INSPECT" in temp_actions)
+    check("包含 TEMP_ALERT", "TEMP_ALERT" in temp_actions)
+    check("包含 TEMP_ALERT_HANDLE", "TEMP_ALERT_HANDLE" in temp_actions)
+
     section("重启后验证总结")
     print(f"  通过: {passed}, 失败: {failed}")
     for f in ["export_before_restart.json", "batch_before_restart.json", "batch2_before_restart.json",
               "location_before_restart.json", "location_log_before_restart.json",
               "transfers_before_restart.json", "batch_transfer_before_restart.json",
-              "transfer_locations_before_restart.json"]:
+              "transfer_locations_before_restart.json",
+              "temperature_before_restart.json", "temp_location_before_restart.json",
+              "temp_alerts_before_restart.json"]:
         try:
             os.remove(f)
         except:
