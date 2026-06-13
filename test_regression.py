@@ -360,6 +360,253 @@ def run_phase1():
     with open("location_before_restart.json", "w", encoding="utf-8") as f:
         json.dump(loc_before, f, ensure_ascii=False, indent=2)
 
+    section("16. 批次调拨 - 成功路径")
+
+    section("16.1 记录调拨前库位和批次状态")
+    resp = requests.get(f"{BASE}/api/locations/B-01")
+    b01_before = resp.json()
+    print(f"  B-01 调拨前: used={b01_before['used']}")
+    resp = requests.get(f"{BASE}/api/locations/A-01")
+    a01_before = resp.json()
+    print(f"  A-01 调拨前: used={a01_before['used']}")
+    resp = requests.get(f"{BASE}/api/batches/REAG-2026-0002")
+    batch_before = resp.json()
+    print(f"  REAG-2026-0002 调拨前: location={batch_before['location_name']}")
+
+    section("16.2 复核员成功调拨 REAG-2026-0002 从 B-01 到 A-01")
+    resp = requests.post(f"{BASE}/api/batches/REAG-2026-0002/transfer", json={
+        "username": "charlie",
+        "to_location_code": "A-01",
+        "remark": "常温转冷藏，试剂需低温保存"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 200", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+    check("batch_no 正确", d.get("batch_no") == "REAG-2026-0002", f"实际: {d.get('batch_no')}")
+    check("from_location_code = B-01", d.get("from_location_code") == "B-01", f"实际: {d.get('from_location_code')}")
+    check("to_location_code = A-01", d.get("to_location_code") == "A-01", f"实际: {d.get('to_location_code')}")
+    check("操作人是 charlie", d.get("username") == "charlie", f"实际: {d.get('username')}")
+    check("操作人角色是 reviewer", d.get("user_role") == "reviewer", f"实际: {d.get('user_role')}")
+    check("备注包含 '低温'", "低温" in (d.get("remark") or ""), f"实际: {d.get('remark')}")
+
+    section("16.3 验证调拨后批次位置已更新")
+    resp = requests.get(f"{BASE}/api/batches/REAG-2026-0002")
+    batch_after = resp.json()
+    print(f"  REAG-2026-0002 调拨后: location={batch_after['location_name']}")
+    check("批次位置变为 A-01", batch_after["location_name"] == "冷藏柜A-01", f"实际: {batch_after['location_name']}")
+    check("批次状态仍为 REGISTERED", batch_after["status"] == "REGISTERED", f"实际: {batch_after['status']}")
+
+    section("16.4 验证调拨后源库位和目标库位 used 计数已更新")
+    resp = requests.get(f"{BASE}/api/locations/B-01")
+    b01_after = resp.json()
+    print(f"  B-01 调拨后: used={b01_after['used']}")
+    check("B-01 used -1", b01_after["used"] == b01_before["used"] - 1, f"实际: {b01_after['used']}, 预期: {b01_before['used'] - 1}")
+
+    resp = requests.get(f"{BASE}/api/locations/A-01")
+    a01_after = resp.json()
+    print(f"  A-01 调拨后: used={a01_after['used']}")
+    check("A-01 used +1", a01_after["used"] == a01_before["used"] + 1, f"实际: {a01_after['used']}, 预期: {a01_before['used'] + 1}")
+
+    section("16.5 验证审计日志已写入 TRANSFER 记录")
+    resp = requests.get(f"{BASE}/api/audit-logs", params={"batch_no": "REAG-2026-0002"})
+    d = resp.json()
+    transfer_logs = [log for log in d["items"] if log["action"] == "TRANSFER"]
+    print(f"  TRANSFER 审计日志条数: {len(transfer_logs)}")
+    check("存在 TRANSFER 审计记录", len(transfer_logs) >= 1)
+    if transfer_logs:
+        log = transfer_logs[0]
+        check("审计操作人是 charlie", log.get("username") == "charlie")
+        check("审计操作人角色是 reviewer", log.get("user_role") == "reviewer")
+        check("审计备注包含 A-01", "A-01" in (log.get("remark") or ""))
+        check("审计备注包含 B-01", "B-01" in (log.get("remark") or ""))
+
+    section("16.6 验证库位日志已写入 TRANSFER_OUT 和 TRANSFER_IN")
+    resp = requests.get(f"{BASE}/api/location-logs", params={"location_code": "B-01"})
+    d = resp.json()
+    b01_transfer_out = [log for log in d["items"] if log["action"] == "TRANSFER_OUT"]
+    print(f"  B-01 TRANSFER_OUT 日志条数: {len(b01_transfer_out)}")
+    check("B-01 存在 TRANSFER_OUT 日志", len(b01_transfer_out) >= 1)
+    if b01_transfer_out:
+        check("B-01 TRANSFER_OUT 操作人是 charlie", b01_transfer_out[0].get("username") == "charlie")
+
+    resp = requests.get(f"{BASE}/api/location-logs", params={"location_code": "A-01"})
+    d = resp.json()
+    a01_transfer_in = [log for log in d["items"] if log["action"] == "TRANSFER_IN"]
+    print(f"  A-01 TRANSFER_IN 日志条数: {len(a01_transfer_in)}")
+    check("A-01 存在 TRANSFER_IN 日志", len(a01_transfer_in) >= 1)
+    if a01_transfer_in:
+        check("A-01 TRANSFER_IN 操作人是 charlie", a01_transfer_in[0].get("username") == "charlie")
+
+    section("17. 批次调拨 - 查询调拨记录")
+
+    section("17.1 按批次查询调拨记录")
+    resp = requests.get(f"{BASE}/api/transfers", params={"batch_no": "REAG-2026-0002"})
+    d = resp.json()
+    print(f"  按批次查询调拨记录数: {d['total']}")
+    check("至少 1 条调拨记录", d["total"] >= 1)
+    if d["items"]:
+        t = d["items"][0]
+        check("batch_no 正确", t["batch_no"] == "REAG-2026-0002")
+        check("from_location_code = B-01", t["from_location_code"] == "B-01")
+        check("to_location_code = A-01", t["to_location_code"] == "A-01")
+        check("操作人是 charlie", t["username"] == "charlie")
+
+    section("17.2 按源库位查询调拨记录")
+    resp = requests.get(f"{BASE}/api/transfers", params={"from_location_code": "B-01"})
+    d = resp.json()
+    print(f"  按源库位 B-01 查询: {d['total']} 条")
+    check("至少 1 条记录", d["total"] >= 1)
+    check("所有记录 from_location_code = B-01", all(t["from_location_code"] == "B-01" for t in d["items"]))
+
+    section("17.3 按目标库位查询调拨记录")
+    resp = requests.get(f"{BASE}/api/transfers", params={"to_location_code": "A-01"})
+    d = resp.json()
+    print(f"  按目标库位 A-01 查询: {d['total']} 条")
+    check("至少 1 条记录", d["total"] >= 1)
+    check("所有记录 to_location_code = A-01", all(t["to_location_code"] == "A-01" for t in d["items"]))
+
+    section("17.4 按操作人查询调拨记录")
+    resp = requests.get(f"{BASE}/api/transfers", params={"username": "charlie"})
+    d = resp.json()
+    print(f"  按 charlie 查询: {d['total']} 条")
+    check("至少 1 条记录", d["total"] >= 1)
+    check("所有操作人是 charlie", all(t["username"] == "charlie" for t in d["items"]))
+
+    section("17.5 operator 可以查询调拨记录（只读权限）")
+    resp = requests.get(f"{BASE}/api/transfers")
+    d = resp.json()
+    check("operator 查询不报错", resp.status_code == 200)
+    check("返回列表格式", "items" in d and "total" in d)
+
+    section("18. 批次调拨 - 导出调拨记录")
+    resp = requests.get(f"{BASE}/api/export/transfers", params={"batch_no": "REAG-2026-0002"})
+    export_data = resp.json()
+    print(f"  导出调拨记录数: {export_data['total']}")
+    check("导出 total >= 1", export_data["total"] >= 1)
+    check("导出有 records 字段", "records" in export_data)
+    check("导出 records 有 batch_no=REAG-2026-0002",
+          any(r["batch_no"] == "REAG-2026-0002" for r in export_data["records"]))
+    check("导出每条都有 operator", all(r.get("operator") for r in export_data["records"]))
+    check("导出每条都有 operator_role", all(r.get("operator_role") for r in export_data["records"]))
+    check("导出每条都有 from_location_code", all(r.get("from_location_code") for r in export_data["records"]))
+    check("导出每条都有 to_location_code", all(r.get("to_location_code") for r in export_data["records"]))
+
+    with open("transfers_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(export_data, f, ensure_ascii=False, indent=2)
+    print("  已保存 transfers_before_restart.json")
+
+    section("19. 批次调拨 - 失败路径验证")
+
+    section("19.1 普通操作员尝试调拨（权限不足）")
+    resp = requests.post(f"{BASE}/api/batches/REAG-2026-0001/transfer", json={
+        "username": "alice",
+        "to_location_code": "A-02"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 403", resp.status_code == 403, f"实际: {resp.status_code}")
+    check("错误信息含 '权限'", "权限" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    resp2 = requests.get(f"{BASE}/api/batches/REAG-2026-0001")
+    batch_check = resp2.json()
+    check("批次位置未变", batch_check["location_name"] == "冷藏柜A-01", f"实际: {batch_check['location_name']}")
+
+    section("19.2 同库位调拨（源库位=目标库位）")
+    resp = requests.post(f"{BASE}/api/batches/REAG-2026-0002/transfer", json={
+        "username": "charlie",
+        "to_location_code": "A-01"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '相同'", "相同" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("19.3 目标库位已冻结")
+    resp = requests.post(f"{BASE}/api/batches/REAG-2026-0001/transfer", json={
+        "username": "charlie",
+        "to_location_code": "A-02"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '冻结'", "冻结" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("19.4 目标库位容量已满")
+    requests.post(f"{BASE}/api/locations", json={
+        "code": "TF-FULL-01",
+        "name": "调拨满库位测试",
+        "capacity": 1
+    })
+    requests.post(f"{BASE}/api/batches", json={
+        "batch_no": "TF-FULL-BATCH-01",
+        "reagent_name": "占库位试剂",
+        "total_quantity": 5,
+        "expiry_date": "2027-01-01",
+        "location_code": "TF-FULL-01",
+        "username": "bob"
+    })
+    resp = requests.post(f"{BASE}/api/batches/REAG-2026-0001/transfer", json={
+        "username": "charlie",
+        "to_location_code": "TF-FULL-01"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '已满'", "已满" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("19.5 已封存批次不能调拨")
+    requests.post(f"{BASE}/api/locations", json={
+        "code": "TF-SEALED-LOC",
+        "name": "封存测试库位",
+        "capacity": 10
+    })
+    requests.post(f"{BASE}/api/batches", json={
+        "batch_no": "TF-SEALED-01",
+        "reagent_name": "封存调拨测试",
+        "total_quantity": 5,
+        "expiry_date": "2027-01-01",
+        "location_code": "TF-SEALED-LOC",
+        "username": "bob"
+    })
+    requests.post(f"{BASE}/api/batches/TF-SEALED-01/pickup", json={
+        "username": "alice", "quantity": 1
+    })
+    requests.post(f"{BASE}/api/batches/TF-SEALED-01/return", json={
+        "username": "alice", "quantity": 1
+    })
+    requests.post(f"{BASE}/api/batches/TF-SEALED-01/seal", json={
+        "username": "charlie"
+    })
+    resp = requests.post(f"{BASE}/api/batches/TF-SEALED-01/transfer", json={
+        "username": "charlie",
+        "to_location_code": "A-01"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '封存'", "封存" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("19.6 冲突失败时数据不修改")
+    resp = requests.get(f"{BASE}/api/batches/REAG-2026-0002")
+    batch_final = resp.json()
+    check("冲突后批次仍在 A-01", batch_final["location_name"] == "冷藏柜A-01", f"实际: {batch_final['location_name']}")
+    resp = requests.get(f"{BASE}/api/locations/A-01")
+    a01_final = resp.json()
+    resp = requests.get(f"{BASE}/api/locations/B-01")
+    b01_final = resp.json()
+    print(f"  A-01 used={a01_final['used']}, B-01 used={b01_final['used']}")
+    check("库位计数与成功调拨后一致", a01_final["used"] == a01_after["used"] and b01_final["used"] == b01_after["used"])
+
+    section("20. 保存调拨重启前状态")
+    with open("batch_transfer_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(batch_final, f, ensure_ascii=False, indent=2)
+    transfer_loc_state = {
+        "A-01": a01_final,
+        "B-01": b01_final
+    }
+    with open("transfer_locations_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(transfer_loc_state, f, ensure_ascii=False, indent=2)
+
     section("15. 记录重启前状态（用于重启后比对）")
     resp = requests.get(f"{BASE}/api/batches/REG-TEST-001")
     before = resp.json()
@@ -483,10 +730,76 @@ def run_restart_checks():
     check("批次状态仍为 IN_USE", batch_after["status"] == "IN_USE", f"实际: {batch_after['status']}")
     check("可用数量仍为 12", batch_after["available_quantity"] == 12, f"实际: {batch_after['available_quantity']}")
 
+    section("22. 重启后 - 调拨批次位置一致")
+    with open("batch_transfer_before_restart.json", "r", encoding="utf-8") as f:
+        batch_transfer_before = json.load(f)
+    resp = requests.get(f"{BASE}/api/batches/REAG-2026-0002")
+    batch_transfer_after = resp.json()
+    print(f"  重启前: location={batch_transfer_before['location_name']}")
+    print(f"  重启后: location={batch_transfer_after['location_name']}")
+    check("调拨后批次位置仍为 A-01", batch_transfer_after["location_name"] == "冷藏柜A-01",
+          f"实际: {batch_transfer_after['location_name']}")
+    check("批次位置一致", batch_transfer_before["location_name"] == batch_transfer_after["location_name"])
+
+    section("23. 重启后 - 调拨源库位和目标库位 used 计数一致")
+    with open("transfer_locations_before_restart.json", "r", encoding="utf-8") as f:
+        transfer_loc_before = json.load(f)
+    resp = requests.get(f"{BASE}/api/locations/A-01")
+    a01_after = resp.json()
+    resp = requests.get(f"{BASE}/api/locations/B-01")
+    b01_after = resp.json()
+    print(f"  A-01: 重启前 used={transfer_loc_before['A-01']['used']}, 重启后 used={a01_after['used']}")
+    print(f"  B-01: 重启前 used={transfer_loc_before['B-01']['used']}, 重启后 used={b01_after['used']}")
+    check("A-01 used 计数一致", transfer_loc_before["A-01"]["used"] == a01_after["used"])
+    check("B-01 used 计数一致", transfer_loc_before["B-01"]["used"] == b01_after["used"])
+
+    section("24. 重启后 - 调拨记录一致")
+    resp = requests.get(f"{BASE}/api/transfers", params={"batch_no": "REAG-2026-0002"})
+    d = resp.json()
+    print(f"  重启后 REAG-2026-0002 调拨记录数: {d['total']}")
+    check("调拨记录仍存在", d["total"] >= 1)
+    if d["items"]:
+        t = d["items"][0]
+        check("from_location_code = B-01", t["from_location_code"] == "B-01")
+        check("to_location_code = A-01", t["to_location_code"] == "A-01")
+        check("操作人是 charlie", t["username"] == "charlie")
+
+    section("25. 重启后 - 调拨导出一致")
+    with open("transfers_before_restart.json", "r", encoding="utf-8") as f:
+        transfer_export_before = json.load(f)
+    resp = requests.get(f"{BASE}/api/export/transfers", params={"batch_no": "REAG-2026-0002"})
+    transfer_export_after = resp.json()
+    print(f"  重启前调拨导出 total: {transfer_export_before['total']}")
+    print(f"  重启后调拨导出 total: {transfer_export_after['total']}")
+    check("调拨导出记录数一致", transfer_export_before["total"] == transfer_export_after["total"])
+    if transfer_export_after["records"]:
+        r = transfer_export_after["records"][0]
+        check("导出 batch_no 一致", r["batch_no"] == "REAG-2026-0002")
+        check("导出 from_location_code 一致", r["from_location_code"] == "B-01")
+        check("导出 to_location_code 一致", r["to_location_code"] == "A-01")
+
+    section("26. 重启后 - 调拨审计和库位日志一致")
+    resp = requests.get(f"{BASE}/api/audit-logs", params={"batch_no": "REAG-2026-0002"})
+    d = resp.json()
+    transfer_logs = [log for log in d["items"] if log["action"] == "TRANSFER"]
+    check("TRANSFER 审计日志仍存在", len(transfer_logs) >= 1)
+
+    resp = requests.get(f"{BASE}/api/location-logs", params={"location_code": "B-01"})
+    d = resp.json()
+    b01_out = [log for log in d["items"] if log["action"] == "TRANSFER_OUT"]
+    check("B-01 TRANSFER_OUT 日志仍存在", len(b01_out) >= 1)
+
+    resp = requests.get(f"{BASE}/api/location-logs", params={"location_code": "A-01"})
+    d = resp.json()
+    a01_in = [log for log in d["items"] if log["action"] == "TRANSFER_IN"]
+    check("A-01 TRANSFER_IN 日志仍存在", len(a01_in) >= 1)
+
     section("重启后验证总结")
     print(f"  通过: {passed}, 失败: {failed}")
     for f in ["export_before_restart.json", "batch_before_restart.json", "batch2_before_restart.json",
-              "location_before_restart.json", "location_log_before_restart.json"]:
+              "location_before_restart.json", "location_log_before_restart.json",
+              "transfers_before_restart.json", "batch_transfer_before_restart.json",
+              "transfer_locations_before_restart.json"]:
         try:
             os.remove(f)
         except:

@@ -131,3 +131,32 @@ class LocationLogResponse(BaseModel):
 class LocationLogListResponse(BaseModel):
     items: List[LocationLogResponse]
     total: int
+
+
+class BatchTransferCreate(BaseModel):
+    username: str
+    to_location_code: str
+    remark: Optional[str] = None
+
+
+class BatchTransferResponse(BaseModel):
+    id: int
+    batch_id: int
+    batch_no: str
+    from_location_id: int
+    from_location_code: str
+    to_location_id: int
+    to_location_code: str
+    user_id: int
+    username: str
+    user_role: str
+    remark: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BatchTransferListResponse(BaseModel):
+    items: List[BatchTransferResponse]
+    total: int

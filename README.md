@@ -53,8 +53,8 @@ uvicorn main:app --reload --host 127.0.0.1 --port 8000
 
 | 角色 | 权限 |
 |------|------|
-| `operator` (操作员) | 登记批次、领取留样、归还留样 |
-| `reviewer` (复核员) | 所有操作员权限 + 复核封存、报废、冻结/解冻库位 |
+| `operator` (操作员) | 登记批次、领取留样、归还留样、查看调拨记录 |
+| `reviewer` (复核员) | 所有操作员权限 + 复核封存、报废、冻结/解冻库位、发起批次调拨 |
 
 ### 状态流转
 
@@ -399,3 +399,20 @@ SQLite 数据库文件为 `reagent_sample.db`，位于项目根目录。删除�
 - `to_status`: 变更后状态
 - `remark`: 备注
 - `created_at`: 操作时间
+
+### 库位操作日志 (LocationLog)
+- `id`: 主键
+- `location_id`: 库位ID
+- `user_id`: 操作人ID
+- `action`: 操作类型（FREEZE / UNFREEZE / TRANSFER_OUT / TRANSFER_IN）
+- `remark`: 备注
+- `created_at`: 操作时间
+
+### 批次调拨记录 (BatchTransfer)
+- `id`: 主键
+- `batch_id`: 批次ID
+- `from_location_id`: 源库位ID
+- `to_location_id`: 目标库位ID
+- `user_id`: 操作人ID（必须是 reviewer）
+- `remark`: 调拨备注
+- `created_at`: 调拨时间

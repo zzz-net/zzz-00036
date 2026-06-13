@@ -37,6 +37,10 @@ ACTION_SCRAP = "SCRAP"
 ACTION_LOCATION_FREEZE = "FREEZE"
 ACTION_LOCATION_UNFREEZE = "UNFREEZE"
 
+ACTION_TRANSFER = "TRANSFER"
+ACTION_LOCATION_TRANSFER_OUT = "TRANSFER_OUT"
+ACTION_LOCATION_TRANSFER_IN = "TRANSFER_IN"
+
 
 def get_user_or_404(db: Session, username: str) -> models.User:
     user = db.query(models.User).filter(models.User.username == username).first()
@@ -140,6 +144,23 @@ def location_log_to_response(log: models.LocationLog) -> schemas.LocationLogResp
     )
 
 
+def transfer_to_response(transfer: models.BatchTransfer) -> schemas.BatchTransferResponse:
+    return schemas.BatchTransferResponse(
+        id=transfer.id,
+        batch_id=transfer.batch_id,
+        batch_no=transfer.batch.batch_no if transfer.batch else None,
+        from_location_id=transfer.from_location_id,
+        from_location_code=transfer.from_location.code if transfer.from_location else None,
+        to_location_id=transfer.to_location_id,
+        to_location_code=transfer.to_location.code if transfer.to_location else None,
+        user_id=transfer.user_id,
+        username=transfer.user.username if transfer.user else None,
+        user_role=transfer.user.role if transfer.user else None,
+        remark=transfer.remark,
+        created_at=transfer.created_at
+    )
+
+
 def migrate_db():
     from sqlalchemy import text
     db = next(get_db())
@@ -158,6 +179,25 @@ def migrate_db():
                 remark TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (location_id) REFERENCES locations (id),
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """))
+        db.commit()
+    except Exception:
+        db.rollback()
+    try:
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS batch_transfers (
+                id INTEGER PRIMARY KEY,
+                batch_id INTEGER NOT NULL,
+                from_location_id INTEGER NOT NULL,
+                to_location_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                remark TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (batch_id) REFERENCES batches (id),
+                FOREIGN KEY (from_location_id) REFERENCES locations (id),
+                FOREIGN KEY (to_location_id) REFERENCES locations (id),
                 FOREIGN KEY (user_id) REFERENCES users (id)
             )
         """))
@@ -213,6 +253,7 @@ def init_sample_data():
             ),
         ]
         db.add_all(batches)
+        db.flush()
 
         for loc in [loc_a01, loc_b01]:
             loc.used = db.query(models.Batch).filter(
@@ -667,5 +708,167 @@ def export_audit_logs(
         media_type="application/json",
         headers={
             "Content-Disposition": f'attachment; filename="audit_log_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.json"'
+        }
+    )
+
+
+@app.post("/api/batches/{batch_no}/transfer", response_model=schemas.BatchTransferResponse, summary="调拨批次到新库位")
+def transfer_batch(batch_no: str, req: schemas.BatchTransferCreate, db: Session = Depends(get_db)):
+    user = get_user_or_404(db, req.username)
+    require_role(user, [ROLE_REVIEWER])
+
+    batch = get_batch_or_404(db, batch_no)
+
+    if batch.status in [STATUS_SEALED, STATUS_SCRAPPED]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"批次 {batch_no} 当前状态为 {batch.status}，已封存或已报废，不能调拨"
+        )
+
+    to_location = get_location_or_404(db, req.to_location_code)
+    from_location = batch.location
+
+    if from_location.id == to_location.id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"源库位和目标库位相同（{from_location.code}），无需调拨"
+        )
+
+    if to_location.frozen:
+        raise HTTPException(
+            status_code=400,
+            detail=f"目标库位 {to_location.code} 已冻结，不能调入"
+        )
+
+    if to_location.used >= to_location.capacity:
+        raise HTTPException(
+            status_code=400,
+            detail=f"目标库位 {to_location.code} 容量已满（{to_location.used}/{to_location.capacity}），无法调入"
+        )
+
+    transfer = models.BatchTransfer(
+        batch_id=batch.id,
+        from_location_id=from_location.id,
+        to_location_id=to_location.id,
+        user_id=user.id,
+        remark=req.remark
+    )
+    db.add(transfer)
+
+    batch.location_id = to_location.id
+    from_location.used -= 1
+    to_location.used += 1
+    db.flush()
+
+    add_audit_log(
+        db, batch.id, user.id, ACTION_TRANSFER,
+        from_status=batch.status,
+        to_status=batch.status,
+        remark=f"从 {from_location.code} 调拨到 {to_location.code}" + (f"，{req.remark}" if req.remark else "")
+    )
+
+    add_location_log(
+        db, from_location.id, user.id, ACTION_LOCATION_TRANSFER_OUT,
+        remark=f"调出批次 {batch_no} 到 {to_location.code}" + (f"，{req.remark}" if req.remark else "")
+    )
+    add_location_log(
+        db, to_location.id, user.id, ACTION_LOCATION_TRANSFER_IN,
+        remark=f"从 {from_location.code} 调入批次 {batch_no}" + (f"，{req.remark}" if req.remark else "")
+    )
+
+    db.commit()
+    db.refresh(transfer)
+    return transfer_to_response(transfer)
+
+
+@app.get("/api/transfers", summary="调拨记录查询")
+def list_transfers(
+    batch_no: Optional[str] = None,
+    from_location_code: Optional[str] = None,
+    to_location_code: Optional[str] = None,
+    username: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.BatchTransfer)
+
+    if batch_no:
+        batch = db.query(models.Batch).filter(models.Batch.batch_no == batch_no).first()
+        if batch:
+            query = query.filter(models.BatchTransfer.batch_id == batch.id)
+        else:
+            return {"items": [], "total": 0}
+
+    if from_location_code:
+        loc = db.query(models.Location).filter(models.Location.code == from_location_code).first()
+        if loc:
+            query = query.filter(models.BatchTransfer.from_location_id == loc.id)
+        else:
+            return {"items": [], "total": 0}
+
+    if to_location_code:
+        loc = db.query(models.Location).filter(models.Location.code == to_location_code).first()
+        if loc:
+            query = query.filter(models.BatchTransfer.to_location_id == loc.id)
+        else:
+            return {"items": [], "total": 0}
+
+    if username:
+        user = db.query(models.User).filter(models.User.username == username).first()
+        if user:
+            query = query.filter(models.BatchTransfer.user_id == user.id)
+        else:
+            return {"items": [], "total": 0}
+
+    query = query.order_by(models.BatchTransfer.created_at.desc())
+    transfers = query.all()
+    items = [transfer_to_response(t) for t in transfers]
+    return {"items": items, "total": len(items)}
+
+
+@app.get("/api/export/transfers", summary="导出调拨记录为 JSON")
+def export_transfers(
+    batch_no: Optional[str] = None,
+    from_location_code: Optional[str] = None,
+    to_location_code: Optional[str] = None,
+    username: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    result = list_transfers(
+        batch_no=batch_no,
+        from_location_code=from_location_code,
+        to_location_code=to_location_code,
+        username=username,
+        db=db
+    )
+
+    export_data = {
+        "export_time": datetime.utcnow().isoformat(),
+        "filter": {
+            "batch_no": batch_no,
+            "from_location_code": from_location_code,
+            "to_location_code": to_location_code,
+            "username": username
+        },
+        "total": result["total"],
+        "records": []
+    }
+
+    for t in result["items"]:
+        export_data["records"].append({
+            "id": t.id,
+            "batch_no": t.batch_no,
+            "from_location_code": t.from_location_code,
+            "to_location_code": t.to_location_code,
+            "operator": t.username,
+            "operator_role": t.user_role,
+            "remark": t.remark,
+            "operated_at": t.created_at.isoformat()
+        })
+
+    return JSONResponse(
+        content=export_data,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": f'attachment; filename="transfers_{datetime.utcnow().strftime("%Y%m%d_%H%M%S")}.json"'
         }
     )

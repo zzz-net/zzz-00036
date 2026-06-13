@@ -14,6 +14,7 @@ class User(Base):
 
     audit_logs = relationship("AuditLog", back_populates="user")
     location_logs = relationship("LocationLog", back_populates="user")
+    transfers = relationship("BatchTransfer", back_populates="user")
 
 
 class Location(Base):
@@ -29,6 +30,8 @@ class Location(Base):
 
     batches = relationship("Batch", back_populates="location")
     location_logs = relationship("LocationLog", back_populates="location")
+    transfers_from = relationship("BatchTransfer", foreign_keys="BatchTransfer.from_location_id", back_populates="from_location")
+    transfers_to = relationship("BatchTransfer", foreign_keys="BatchTransfer.to_location_id", back_populates="to_location")
 
 
 class Batch(Base):
@@ -47,6 +50,7 @@ class Batch(Base):
 
     location = relationship("Location", back_populates="batches")
     audit_logs = relationship("AuditLog", back_populates="batch")
+    transfers = relationship("BatchTransfer", back_populates="batch")
 
 
 class AuditLog(Base):
@@ -78,3 +82,20 @@ class LocationLog(Base):
 
     location = relationship("Location", back_populates="location_logs")
     user = relationship("User", back_populates="location_logs")
+
+
+class BatchTransfer(Base):
+    __tablename__ = "batch_transfers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(Integer, ForeignKey("batches.id"), nullable=False)
+    from_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    to_location_id = Column(Integer, ForeignKey("locations.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    remark = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    batch = relationship("Batch", back_populates="transfers")
+    from_location = relationship("Location", foreign_keys=[from_location_id], back_populates="transfers_from")
+    to_location = relationship("Location", foreign_keys=[to_location_id], back_populates="transfers_to")
+    user = relationship("User", back_populates="transfers")
