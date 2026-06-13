@@ -17,6 +17,10 @@ class User(Base):
     transfers = relationship("BatchTransfer", back_populates="user")
     temperature_inspections = relationship("TemperatureInspection", back_populates="user")
     temperature_alerts_handled = relationship("TemperatureAlert", foreign_keys="TemperatureAlert.handler_id", back_populates="handler")
+    equipment_owned = relationship("Equipment", foreign_keys="Equipment.owner_id", back_populates="owner")
+    calibration_plans_owned = relationship("CalibrationPlan", foreign_keys="CalibrationPlan.owner_id", back_populates="owner")
+    calibration_records = relationship("CalibrationRecord", back_populates="user")
+    calibration_logs = relationship("CalibrationLog", back_populates="user")
 
 
 class Location(Base):
@@ -142,3 +146,96 @@ class TemperatureAlert(Base):
     location = relationship("Location", back_populates="temperature_alerts")
     inspection = relationship("TemperatureInspection")
     handler = relationship("User", foreign_keys=[handler_id], back_populates="temperature_alerts_handled")
+
+
+EQUIPMENT_STATUS_ACTIVE = "ACTIVE"
+EQUIPMENT_STATUS_DISABLED = "DISABLED"
+
+PLAN_STATUS_SCHEDULED = "SCHEDULED"
+PLAN_STATUS_COMPLETED = "COMPLETED"
+PLAN_STATUS_OVERDUE = "OVERDUE"
+
+ACTION_EQUIPMENT_CREATE = "EQUIPMENT_CREATE"
+ACTION_EQUIPMENT_UPDATE = "EQUIPMENT_UPDATE"
+ACTION_EQUIPMENT_DISABLE = "EQUIPMENT_DISABLE"
+ACTION_PLAN_SCHEDULE = "PLAN_SCHEDULE"
+ACTION_PLAN_COMPLETE = "PLAN_COMPLETE"
+ACTION_CYCLE_UPDATE = "CYCLE_UPDATE"
+ACTION_OWNER_CHANGE = "OWNER_CHANGE"
+
+
+class Equipment(Base):
+    __tablename__ = "equipment"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(50), unique=True, index=True, nullable=False)
+    name = Column(String(200), nullable=False)
+    category = Column(String(50), nullable=False)
+    manufacturer = Column(String(200), nullable=True)
+    model = Column(String(200), nullable=True)
+    serial_no = Column(String(100), nullable=True)
+    location = Column(String(200), nullable=True)
+    calibration_cycle_days = Column(Integer, nullable=False, default=90)
+    status = Column(String(20), default=EQUIPMENT_STATUS_ACTIVE, nullable=False)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    owner = relationship("User", foreign_keys=[owner_id], back_populates="equipment_owned")
+    calibration_plans = relationship("CalibrationPlan", back_populates="equipment")
+    calibration_records = relationship("CalibrationRecord", back_populates="equipment")
+    calibration_logs = relationship("CalibrationLog", back_populates="equipment")
+
+
+class CalibrationPlan(Base):
+    __tablename__ = "calibration_plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    equipment_id = Column(Integer, ForeignKey("equipment.id"), nullable=False)
+    scheduled_date = Column(Date, nullable=False)
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    status = Column(String(20), default=PLAN_STATUS_SCHEDULED, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    equipment = relationship("Equipment", back_populates="calibration_plans")
+    owner = relationship("User", foreign_keys=[owner_id], back_populates="calibration_plans_owned")
+    calibration_record = relationship("CalibrationRecord", back_populates="plan", uselist=False)
+    calibration_logs = relationship("CalibrationLog", back_populates="plan")
+
+
+class CalibrationRecord(Base):
+    __tablename__ = "calibration_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    plan_id = Column(Integer, ForeignKey("calibration_plans.id"), nullable=False, unique=True)
+    equipment_id = Column(Integer, ForeignKey("equipment.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    completion_date = Column(Date, nullable=False)
+    result = Column(String(50), nullable=False)
+    certificate_no = Column(String(100), nullable=True)
+    remark = Column(Text, nullable=True)
+    next_calibration_date = Column(Date, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    plan = relationship("CalibrationPlan", back_populates="calibration_record")
+    equipment = relationship("Equipment", back_populates="calibration_records")
+    user = relationship("User", back_populates="calibration_records")
+
+
+class CalibrationLog(Base):
+    __tablename__ = "calibration_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    equipment_id = Column(Integer, ForeignKey("equipment.id"), nullable=True)
+    plan_id = Column(Integer, ForeignKey("calibration_plans.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    action = Column(String(50), nullable=False)
+    from_status = Column(String(20), nullable=True)
+    to_status = Column(String(20), nullable=True)
+    remark = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    equipment = relationship("Equipment", back_populates="calibration_logs")
+    plan = relationship("CalibrationPlan", back_populates="calibration_logs")
+    user = relationship("User", back_populates="calibration_logs")

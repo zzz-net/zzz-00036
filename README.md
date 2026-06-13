@@ -635,3 +635,317 @@ curl -s -X POST http://127.0.0.1:8000/api/locations/A-01/temp-config \
 ```
 
 预期结果：HTTP 400，提示最低温度必须小于最高温度。
+
+---
+
+## 设备校准预约模块
+
+### 核心概念
+
+| 角色 | 权限 |
+|------|------|
+| `operator` (操作员) | 提交校准完成记录、查看自己负责的校准计划、查看自己提交的完成记录 |
+| `reviewer` (复核员) | 所有操作员权限 + 创建设备、更新设备信息、设置校准周期、停用设备、安排校准计划、修改校准计划、查看所有设备/计划/记录/日志 |
+
+### 数据模型
+
+#### 设备 (Equipment)
+- `id`: 主键
+- `code`: 设备编码（唯一）
+- `name`: 设备名称
+- `category`: 设备类别（冰箱/移液器/离心机 等）
+- `manufacturer`: 生产厂家
+- `model`: 型号
+- `serial_no`: 序列号
+- `location`: 存放位置
+- `calibration_cycle_days`: 校准周期（天）
+- `status`: 状态（ACTIVE / DISABLED）
+- `owner_id`: 负责人ID
+
+#### 校准计划 (CalibrationPlan)
+- `id`: 主键
+- `equipment_id`: 设备ID
+- `scheduled_date`: 计划校准日期
+- `owner_id`: 负责人ID
+- `status`: 状态（SCHEDULED / COMPLETED / OVERDUE）
+
+#### 校准完成记录 (CalibrationRecord)
+- `id`: 主键
+- `plan_id`: 关联校准计划ID（唯一）
+- `equipment_id`: 设备ID
+- `user_id`: 提交人ID
+- `completion_date`: 校准完成日期
+- `result`: 校准结果（PASS / FAIL 等）
+- `certificate_no`: 校准证书编号
+- `remark`: 备注
+- `next_calibration_date`: 下次校准日期
+
+#### 校准操作日志 (CalibrationLog)
+- `id`: 主键
+- `equipment_id`: 关联设备ID
+- `plan_id`: 关联计划ID
+- `user_id`: 操作人ID
+- `action`: 操作类型（EQUIPMENT_CREATE / EQUIPMENT_UPDATE / EQUIPMENT_DISABLE / PLAN_SCHEDULE / PLAN_COMPLETE / CYCLE_UPDATE / OWNER_CHANGE）
+- `from_status`: 变更前状态
+- `to_status`: 变更后状态
+- `remark`: 备注
+- `created_at`: 操作时间
+
+### 完整流程示例
+
+#### 1. reviewer 创建设备（冰箱、移液器、离心机）
+
+```bash
+# 创建冰箱
+curl -s -X POST http://127.0.0.1:8000/api/equipment \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "charlie",
+    "code": "FRIDGE-001",
+    "name": "低温冷藏冰箱 A1",
+    "category": "冰箱",
+    "manufacturer": "ThermoFisher",
+    "model": "TSX505SA",
+    "serial_no": "SN-FR-2026-001",
+    "location": "实验室1区",
+    "calibration_cycle_days": 180,
+    "owner_username": "alice"
+  }' | python -m json.tool
+```
+
+预期结果：状态为 `ACTIVE`，`owner_username` 为 `alice`。写入 `EQUIPMENT_CREATE` 校准日志。
+
+#### 2. reviewer 更新设备信息（调整校准周期、改负责人）
+
+```bash
+curl -s -X PUT http://127.0.0.1:8000/api/equipment/FRIDGE-001 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "charlie",
+    "calibration_cycle_days": 270,
+    "owner_username": "bob",
+    "location": "实验室1区-A角"
+  }' | python -m json.tool
+```
+
+预期结果：`calibration_cycle_days` 变为 270，`owner_username` 变为 `bob`。写入 `EQUIPMENT_UPDATE`、`CYCLE_UPDATE`、`OWNER_CHANGE` 三条日志。
+
+#### 3. reviewer 安排校准计划
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/calibration-plans \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "charlie",
+    "equipment_code": "FRIDGE-001",
+    "scheduled_date": "2026-07-01",
+    "owner_username": "bob"
+  }' | python -m json.tool
+```
+
+预期结果：状态为 `SCHEDULED`，负责人为 `bob`。写入 `PLAN_SCHEDULE` 日志。若未指定 `owner_username`，默认继承设备负责人。
+
+#### 4. operator 提交校准完成记录
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/calibration-plans/1/complete \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "bob",
+    "completion_date": "2026-07-02",
+    "result": "PASS",
+    "certificate_no": "CERT-FR-20260702-001",
+    "remark": "校准温度误差在 ±0.5°C 范围内，合格",
+    "next_calibration_date": "2027-04-01"
+  }' | python -m json.tool
+```
+
+预期结果：返回校准完成记录，关联的计划状态变为 `COMPLETED`。写入 `PLAN_COMPLETE` 日志。
+
+#### 5. reviewer 停用设备
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/equipment/PIPETTE-001/disable \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "charlie",
+    "remark": "移液器已损坏，更换新设备"
+  }' | python -m json.tool
+```
+
+预期结果：设备状态变为 `DISABLED`。写入 `EQUIPMENT_DISABLE` 日志，备注包含待完成计划数。停用后不能再安排计划或提交校准。
+
+#### 6. 查询校准计划（operator 只能看自己负责的）
+
+```bash
+# reviewer 查看所有
+curl -s "http://127.0.0.1:8000/api/calibration-plans" | python -m json.tool
+
+# operator bob 只看自己的（通过 viewer_username 过滤）
+curl -s "http://127.0.0.1:8000/api/calibration-plans?viewer_username=bob" | python -m json.tool
+
+# 按设备筛选
+curl -s "http://127.0.0.1:8000/api/calibration-plans?equipment_code=FRIDGE-001" | python -m json.tool
+
+# 按状态筛选
+curl -s "http://127.0.0.1:8000/api/calibration-plans?status=SCHEDULED" | python -m json.tool
+
+# 按日期范围筛选
+curl -s "http://127.0.0.1:8000/api/calibration-plans?date_from=2026-06-01&date_to=2026-06-30" | python -m json.tool
+```
+
+#### 7. 查询校准完成记录（operator 只能看自己提交的）
+
+```bash
+# reviewer 查看所有
+curl -s "http://127.0.0.1:8000/api/calibration-records" | python -m json.tool
+
+# operator bob 只看自己提交的
+curl -s "http://127.0.0.1:8000/api/calibration-records?viewer_username=bob" | python -m json.tool
+```
+
+#### 8. JSON 导出（含设备、计划、完成记录、日志摘要）
+
+```bash
+# 全部导出
+curl -s "http://127.0.0.1:8000/api/export/calibration" \
+  -o calibration_export.json
+
+python -m json.tool calibration_export.json
+
+# 按设备筛选导出
+curl -s "http://127.0.0.1:8000/api/export/calibration?equipment_code=FRIDGE-001" \
+  -o calibration_fridge_export.json
+
+# 按计划状态筛选导出
+curl -s "http://127.0.0.1:8000/api/export/calibration?plan_status=COMPLETED" \
+  -o calibration_completed_export.json
+```
+
+导出的 JSON 包含四个部分：
+- `equipment`: 设备列表（含编码、名称、类别、校准周期、状态、负责人）
+- `calibration_plans`: 校准计划列表（含设备、计划日期、负责人、状态）
+- `calibration_records`: 校准完成记录（含设备、提交人、结果、证书号）
+- `audit_logs_summary`: 操作日志摘要（含操作人、动作、状态变更、备注）
+
+### 失败路径验证
+
+#### 1. operator 创建设备（权限不足）
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/equipment \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "code": "FAIL-001",
+    "name": "越权测试",
+    "category": "其他",
+    "calibration_cycle_days": 90
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 403，权限不足。**不会留下半截数据**（设备未创建）。
+
+#### 2. 非负责人尝试提交校准完成
+
+```bash
+# 计划负责人是 bob，alice 尝试提交
+curl -s -X POST http://127.0.0.1:8000/api/calibration-plans/1/complete \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "completion_date": "2026-07-02",
+    "result": "PASS"
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 403，提示只有负责人可以提交。计划状态保持 `SCHEDULED` 不变。
+
+#### 3. 已停用设备提交校准
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/calibration-plans/2/complete \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "completion_date": "2026-06-22",
+    "result": "PASS"
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 400，提示设备已停用。
+
+#### 4. 同一计划重复提交校准完成
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/calibration-plans/1/complete \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "bob",
+    "completion_date": "2026-07-03",
+    "result": "PASS",
+    "certificate_no": "DUPLICATE-TEST"
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 409 冲突，提示已存在完成记录。不会创建重复记录。
+
+#### 5. 日期格式非法
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/calibration-plans \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "charlie",
+    "equipment_code": "FRIDGE-001",
+    "scheduled_date": "2026/07/01"
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 422，格式校验失败。
+
+#### 6. operator 修改校准计划（权限不足）
+
+```bash
+curl -s -X PUT http://127.0.0.1:8000/api/calibration-plans/1 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "alice",
+    "scheduled_date": "2026-08-01"
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 403，权限不足。
+
+#### 7. 给不存在的设备安排计划
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/api/calibration-plans \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "charlie",
+    "equipment_code": "NO-EXIST",
+    "scheduled_date": "2026-08-01"
+  }' | python -m json.tool
+```
+
+预期结果：HTTP 404，设备不存在。
+
+---
+
+## API 接口总览（设备校准模块）
+
+| 方法 | 路径 | 说明 | 权限 |
+|------|------|------|------|
+| POST | `/api/equipment` | 创建设备 | reviewer |
+| PUT | `/api/equipment/{code}` | 更新设备信息 | reviewer |
+| POST | `/api/equipment/{code}/disable` | 停用设备 | reviewer |
+| GET | `/api/equipment` | 设备列表 | 所有用户 |
+| GET | `/api/equipment/{code}` | 设备详情 | 所有用户 |
+| POST | `/api/calibration-plans` | 创建校准计划 | reviewer |
+| PUT | `/api/calibration-plans/{plan_id}` | 更新校准计划 | reviewer |
+| POST | `/api/calibration-plans/{plan_id}/complete` | 提交校准完成记录 | 负责人（operator/reviewer） |
+| GET | `/api/calibration-plans` | 校准计划列表（operator 只看自己的） | 所有用户 |
+| GET | `/api/calibration-records` | 校准完成记录（operator 只看自己的） | 所有用户 |
+| GET | `/api/calibration-logs` | 校准操作日志 | 所有用户 |
+| GET | `/api/export/calibration` | JSON 导出 | 所有用户 |

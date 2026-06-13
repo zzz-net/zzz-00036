@@ -876,6 +876,554 @@ def run_phase1():
     with open("temp_alerts_before_restart.json", "w", encoding="utf-8") as f:
         json.dump(temp_alerts_before, f, ensure_ascii=False, indent=2)
 
+    section("36. 设备校准 - reviewer 创建设备（冰箱、移液器、离心机）")
+
+    section("36.1 reviewer 创建冰箱设备")
+    resp = requests.post(f"{BASE}/api/equipment", json={
+        "username": "charlie",
+        "code": "FRIDGE-001",
+        "name": "低温冷藏冰箱 A1",
+        "category": "冰箱",
+        "manufacturer": "ThermoFisher",
+        "model": "TSX505SA",
+        "serial_no": "SN-FR-2026-001",
+        "location": "实验室1区",
+        "calibration_cycle_days": 180,
+        "owner_username": "alice"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 200", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+    check("code 正确", d.get("code") == "FRIDGE-001")
+    check("name 正确", d.get("name") == "低温冷藏冰箱 A1")
+    check("category 为 冰箱", d.get("category") == "冰箱")
+    check("calibration_cycle_days 为 180", d.get("calibration_cycle_days") == 180)
+    check("status 为 ACTIVE", d.get("status") == "ACTIVE")
+    check("owner_username 为 alice", d.get("owner_username") == "alice")
+    fridge_id = d.get("id")
+
+    section("36.2 reviewer 创建移液器设备")
+    resp = requests.post(f"{BASE}/api/equipment", json={
+        "username": "charlie",
+        "code": "PIPETTE-001",
+        "name": "多通道移液器 P1",
+        "category": "移液器",
+        "manufacturer": "Eppendorf",
+        "model": "Xplorer 10-100μL",
+        "serial_no": "SN-PP-2026-001",
+        "location": "实验室2区",
+        "calibration_cycle_days": 90,
+        "owner_username": "bob"
+    })
+    d = resp.json()
+    check("移液器创建成功", resp.status_code == 200 and d.get("code") == "PIPETTE-001", f"实际: {d.get('detail')}")
+    pipette_id = d.get("id")
+
+    section("36.3 reviewer 创建离心机设备")
+    resp = requests.post(f"{BASE}/api/equipment", json={
+        "username": "charlie",
+        "code": "CENTRI-001",
+        "name": "高速离心机 C1",
+        "category": "离心机",
+        "manufacturer": "Beckman",
+        "model": "Allegra X-15R",
+        "serial_no": "SN-CT-2026-001",
+        "location": "实验室3区",
+        "calibration_cycle_days": 365,
+        "owner_username": "alice"
+    })
+    d = resp.json()
+    check("离心机创建成功", resp.status_code == 200 and d.get("code") == "CENTRI-001", f"实际: {d.get('detail')}")
+    centri_id = d.get("id")
+
+    section("36.4 创建设备已写入校准日志")
+    resp = requests.get(f"{BASE}/api/calibration-logs", params={"equipment_code": "FRIDGE-001", "action": "EQUIPMENT_CREATE"})
+    d = resp.json()
+    check("FRIDGE-001 有 EQUIPMENT_CREATE 日志", d["total"] >= 1, f"实际: {d['total']}")
+    if d["items"]:
+        check("日志操作人是 charlie", d["items"][0].get("username") == "charlie")
+        check("日志操作人角色是 reviewer", d["items"][0].get("user_role") == "reviewer")
+        check("日志 to_status 是 ACTIVE", d["items"][0].get("to_status") == "ACTIVE")
+
+    section("37. 设备校准 - 失败路径：operator 创建设备（权限不足）")
+    resp = requests.post(f"{BASE}/api/equipment", json={
+        "username": "alice",
+        "code": "FAIL-EQ-001",
+        "name": "越权测试设备",
+        "category": "其他",
+        "calibration_cycle_days": 90
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 403", resp.status_code == 403, f"实际: {resp.status_code}")
+    check("错误信息含 '权限'", "权限" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("37.1 验证越权后未留下半截数据")
+    resp = requests.get(f"{BASE}/api/equipment", params={"code": "FAIL-EQ-001"})
+    d = resp.json()
+    check("失败设备不存在", d["total"] == 0, f"实际: {d['total']}")
+
+    section("37.2 设备编码重复")
+    resp = requests.post(f"{BASE}/api/equipment", json={
+        "username": "charlie",
+        "code": "FRIDGE-001",
+        "name": "重复编码设备",
+        "category": "其他",
+        "calibration_cycle_days": 90
+    })
+    d = resp.json()
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '已存在'", "已存在" in d.get("detail", ""))
+
+    section("38. 设备校准 - reviewer 更新设备信息（设置校准周期、改负责人）")
+    resp = requests.put(f"{BASE}/api/equipment/FRIDGE-001", json={
+        "username": "charlie",
+        "calibration_cycle_days": 270,
+        "owner_username": "bob",
+        "location": "实验室1区-A角"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 200", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+    check("校准周期变为 270", d.get("calibration_cycle_days") == 270, f"实际: {d.get('calibration_cycle_days')}")
+    check("负责人变为 bob", d.get("owner_username") == "bob", f"实际: {d.get('owner_username')}")
+    check("location 更新", d.get("location") == "实验室1区-A角")
+
+    section("38.1 更新设备写 EQUIPMENT_UPDATE / CYCLE_UPDATE / OWNER_CHANGE 日志")
+    resp = requests.get(f"{BASE}/api/calibration-logs", params={"equipment_code": "FRIDGE-001"})
+    d = resp.json()
+    actions = [l["action"] for l in d["items"]]
+    print(f"  FRIDGE-001 日志动作: {actions}")
+    check("存在 EQUIPMENT_UPDATE", "EQUIPMENT_UPDATE" in actions)
+    check("存在 CYCLE_UPDATE", "CYCLE_UPDATE" in actions)
+    check("存在 OWNER_CHANGE", "OWNER_CHANGE" in actions)
+
+    section("38.2 operator 尝试更新设备（权限不足）")
+    resp = requests.put(f"{BASE}/api/equipment/FRIDGE-001", json={
+        "username": "alice",
+        "calibration_cycle_days": 100
+    })
+    d = resp.json()
+    check("状态码 403", resp.status_code == 403, f"实际: {resp.status_code}")
+    check("错误信息含 '权限'", "权限" in d.get("detail", ""))
+
+    resp = requests.get(f"{BASE}/api/equipment/FRIDGE-001")
+    check_eq = resp.json()
+    check("校准周期未变，仍是 270", check_eq["calibration_cycle_days"] == 270)
+
+    section("38.3 更新不存在的设备应 404")
+    resp = requests.put(f"{BASE}/api/equipment/NOT-EXIST-999", json={
+        "username": "charlie",
+        "name": "不存在"
+    })
+    d = resp.json()
+    check("状态码 404", resp.status_code == 404)
+    check("错误信息含 '不存在'", "不存在" in d.get("detail", ""))
+
+    section("39. 设备校准 - reviewer 为 FRIDGE-001 和 PIPETTE-001 创建校准计划")
+
+    section("39.1 创建 FRIDGE-001 校准计划，负责人 bob")
+    resp = requests.post(f"{BASE}/api/calibration-plans", json={
+        "username": "charlie",
+        "equipment_code": "FRIDGE-001",
+        "scheduled_date": "2026-07-01",
+        "owner_username": "bob"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 200", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+    check("equipment_code 正确", d.get("equipment_code") == "FRIDGE-001")
+    check("scheduled_date 正确", d.get("scheduled_date") == "2026-07-01")
+    check("owner_username 为 bob", d.get("owner_username") == "bob")
+    check("status 为 SCHEDULED", d.get("status") == "SCHEDULED")
+    fridge_plan_id = d.get("id")
+
+    section("39.2 创建 PIPETTE-001 校准计划，负责人 alice")
+    resp = requests.post(f"{BASE}/api/calibration-plans", json={
+        "username": "charlie",
+        "equipment_code": "PIPETTE-001",
+        "scheduled_date": "2026-06-20",
+        "owner_username": "alice"
+    })
+    d = resp.json()
+    check("PIPETTE-001 计划创建成功", resp.status_code == 200 and d.get("status") == "SCHEDULED", f"实际: {d.get('detail')}")
+    pipette_plan_id = d.get("id")
+
+    section("39.3 创建 CENTRI-001 校准计划（默认继承设备负责人 alice）")
+    resp = requests.post(f"{BASE}/api/calibration-plans", json={
+        "username": "charlie",
+        "equipment_code": "CENTRI-001",
+        "scheduled_date": "2026-12-01"
+    })
+    d = resp.json()
+    check("CENTRI-001 计划创建成功", resp.status_code == 200, f"实际: {d.get('detail')}")
+    check("CENTRI-001 计划负责人继承设备 owner alice", d.get("owner_username") == "alice", f"实际: {d.get('owner_username')}")
+    centri_plan_id = d.get("id")
+
+    section("39.4 创建计划已写入 PLAN_SCHEDULE 日志")
+    resp = requests.get(f"{BASE}/api/calibration-logs", params={"plan_id": fridge_plan_id})
+    d = resp.json()
+    check("计划日志存在", d["total"] >= 1, f"实际: {d['total']}")
+    if d["items"]:
+        check("日志 action 是 PLAN_SCHEDULE", d["items"][0].get("action") == "PLAN_SCHEDULE")
+        check("日志 to_status 是 SCHEDULED", d["items"][0].get("to_status") == "SCHEDULED")
+
+    section("40. 设备校准 - 失败路径：operator 建计划（权限不足）")
+    resp = requests.post(f"{BASE}/api/calibration-plans", json={
+        "username": "alice",
+        "equipment_code": "FRIDGE-001",
+        "scheduled_date": "2026-08-01"
+    })
+    d = resp.json()
+    check("状态码 403", resp.status_code == 403)
+    check("错误信息含 '权限'", "权限" in d.get("detail", ""))
+
+    section("40.1 给不存在的设备建计划")
+    resp = requests.post(f"{BASE}/api/calibration-plans", json={
+        "username": "charlie",
+        "equipment_code": "NO-EXIST",
+        "scheduled_date": "2026-08-01"
+    })
+    d = resp.json()
+    check("状态码 404", resp.status_code == 404)
+
+    section("40.2 日期格式非法")
+    resp = requests.post(f"{BASE}/api/calibration-plans", json={
+        "username": "charlie",
+        "equipment_code": "FRIDGE-001",
+        "scheduled_date": "2026/07/01"
+    })
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 422", resp.status_code == 422)
+
+    section("41. 设备校准 - operator bob 提交 FRIDGE-001 校准完成记录（正常链路）")
+    resp = requests.post(f"{BASE}/api/calibration-plans/{fridge_plan_id}/complete", json={
+        "username": "bob",
+        "completion_date": "2026-07-02",
+        "result": "PASS",
+        "certificate_no": "CERT-FR-20260702-001",
+        "remark": "校准温度误差在 ±0.5°C 范围内，合格",
+        "next_calibration_date": "2027-04-01"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 200", resp.status_code == 200, f"实际: {resp.status_code}, 详情: {d.get('detail')}")
+    check("plan_id 正确", d.get("plan_id") == fridge_plan_id)
+    check("equipment_code 为 FRIDGE-001", d.get("equipment_code") == "FRIDGE-001")
+    check("username 为 bob", d.get("username") == "bob")
+    check("user_role 为 operator", d.get("user_role") == "operator")
+    check("result 为 PASS", d.get("result") == "PASS")
+    check("certificate_no 正确", d.get("certificate_no") == "CERT-FR-20260702-001")
+    check("next_calibration_date 正确", d.get("next_calibration_date") == "2027-04-01")
+
+    section("41.1 完成后计划状态变更为 COMPLETED")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={"equipment_code": "FRIDGE-001"})
+    d = resp.json()
+    check("FRIDGE-001 有 1 个计划", d["total"] >= 1)
+    fridge_plan_after = [p for p in d["items"] if p["id"] == fridge_plan_id][0]
+    check("计划状态变为 COMPLETED", fridge_plan_after.get("status") == "COMPLETED", f"实际: {fridge_plan_after.get('status')}")
+
+    section("41.2 完成记录写 PLAN_COMPLETE 日志")
+    resp = requests.get(f"{BASE}/api/calibration-logs", params={"action": "PLAN_COMPLETE", "plan_id": fridge_plan_id})
+    d = resp.json()
+    check("存在 PLAN_COMPLETE 日志", d["total"] >= 1, f"实际: {d['total']}")
+    if d["items"]:
+        log = d["items"][0]
+        check("from_status 为 SCHEDULED", log.get("from_status") == "SCHEDULED")
+        check("to_status 为 COMPLETED", log.get("to_status") == "COMPLETED")
+        check("操作人是 bob", log.get("username") == "bob")
+        check("备注含 PASS 和证书号", "PASS" in (log.get("remark") or "") and "CERT-FR-20260702-001" in (log.get("remark") or ""))
+
+    section("42. 设备校准 - 失败路径：非负责人 alice 尝试完成 bob 的计划")
+    resp = requests.post(f"{BASE}/api/calibration-plans/{fridge_plan_id}/complete", json={
+        "username": "alice",
+        "completion_date": "2026-06-21",
+        "result": "PASS"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 403", resp.status_code == 403, f"实际: {resp.status_code}")
+    check("错误信息含 '负责人'", "负责人" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("42.1 失败后计划状态不变，仍为 COMPLETED")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={"equipment_code": "FRIDGE-001"})
+    d = resp.json()
+    fridge_plan_after_alice_try = [p for p in d["items"] if p["id"] == fridge_plan_id][0]
+    check("FRIDGE-001 计划仍为 COMPLETED", fridge_plan_after_alice_try.get("status") == "COMPLETED", f"实际: {fridge_plan_after_alice_try.get('status')}")
+
+    section("43. 设备校准 - 失败路径：同一计划重复提交完成记录")
+    resp = requests.post(f"{BASE}/api/calibration-plans/{fridge_plan_id}/complete", json={
+        "username": "bob",
+        "completion_date": "2026-07-03",
+        "result": "PASS",
+        "certificate_no": "DUPLICATE-TEST"
+    })
+    d = resp.json()
+    print(f"  HTTP {resp.status_code}")
+    check("状态码 409 冲突", resp.status_code == 409, f"实际: {resp.status_code}")
+    check("错误信息含 '已存在' 或 '重复'", "已存在" in d.get("detail", "") or "重复" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("44. 设备校准 - 失败路径：停用设备后仍尝试完成 / 建计划")
+
+    section("44.1 reviewer 停用 PIPETTE-001")
+    resp = requests.post(f"{BASE}/api/equipment/PIPETTE-001/disable", json={
+        "username": "charlie",
+        "remark": "移液器已损坏，更换新设备"
+    })
+    d = resp.json()
+    check("停用成功", resp.status_code == 200 and d.get("status") == "DISABLED", f"实际: {d.get('detail')}")
+
+    section("44.2 停用已写入 EQUIPMENT_DISABLE 日志")
+    resp = requests.get(f"{BASE}/api/calibration-logs", params={"equipment_code": "PIPETTE-001", "action": "EQUIPMENT_DISABLE"})
+    d = resp.json()
+    check("存在 EQUIPMENT_DISABLE 日志", d["total"] >= 1, f"实际: {d['total']}")
+    if d["items"]:
+        check("from_status 为 ACTIVE", d["items"][0].get("from_status") == "ACTIVE")
+        check("to_status 为 DISABLED", d["items"][0].get("to_status") == "DISABLED")
+        check("备注含 '损坏'", "损坏" in (d["items"][0].get("remark") or ""))
+
+    section("44.3 operator alice 尝试完成已停用设备 PIPETTE-001 的计划")
+    resp = requests.post(f"{BASE}/api/calibration-plans/{pipette_plan_id}/complete", json={
+        "username": "alice",
+        "completion_date": "2026-06-22",
+        "result": "PASS"
+    })
+    d = resp.json()
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '停用'", "停用" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("44.4 reviewer 尝试给停用设备建计划")
+    resp = requests.post(f"{BASE}/api/calibration-plans", json={
+        "username": "charlie",
+        "equipment_code": "PIPETTE-001",
+        "scheduled_date": "2026-09-01"
+    })
+    d = resp.json()
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '停用'", "停用" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("44.5 停用后尝试修改设备信息")
+    resp = requests.put(f"{BASE}/api/equipment/PIPETTE-001", json={
+        "username": "charlie",
+        "name": "尝试改名"
+    })
+    d = resp.json()
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '停用'", "停用" in d.get("detail", ""))
+
+    section("44.6 重复停用同一设备")
+    resp = requests.post(f"{BASE}/api/equipment/PIPETTE-001/disable", json={
+        "username": "charlie"
+    })
+    d = resp.json()
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '已处于'", "已处于" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("45. 设备校准 - operator 完成 PIPETTE 计划测试前，先改回 ACTIVE（临时用 bob 完成 CENTRI-001）")
+
+    section("45.1 operator alice 完成 CENTRI-001 校准（她是负责人）")
+    resp = requests.post(f"{BASE}/api/calibration-plans/{centri_plan_id}/complete", json={
+        "username": "alice",
+        "completion_date": "2026-12-05",
+        "result": "PASS",
+        "certificate_no": "CERT-CT-20261205-001",
+        "next_calibration_date": "2027-12-01"
+    })
+    d = resp.json()
+    check("CENTRI-001 校准完成成功", resp.status_code == 200, f"实际: {d.get('detail')}")
+
+    section("46. 设备校准 - 权限隔离：operator 只能看到自己负责/提交的记录")
+
+    section("46.1 reviewer charlie 可以看到所有校准计划")
+    resp = requests.get(f"{BASE}/api/calibration-plans")
+    d = resp.json()
+    reviewer_plan_total = d["total"]
+    print(f"  reviewer 可见计划数: {reviewer_plan_total}")
+    check("reviewer 至少能看到 3 个计划", reviewer_plan_total >= 3, f"实际: {reviewer_plan_total}")
+
+    section("46.2 operator bob 查询计划（使用 viewer_username 过滤）只能看自己的")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={"viewer_username": "bob"})
+    d = resp.json()
+    print(f"  bob 可见计划数: {d['total']}")
+    if d["items"]:
+        check("bob 只能看到自己负责的计划", all(p.get("owner_username") in ["bob", None] for p in d["items"]))
+
+    section("46.3 operator alice 查询计划只能看自己的")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={"viewer_username": "alice"})
+    d = resp.json()
+    print(f"  alice 可见计划数: {d['total']}")
+    if d["items"]:
+        check("alice 只能看到自己负责的计划", all(p.get("owner_username") in ["alice", None] for p in d["items"]))
+
+    section("46.4 reviewer 看到所有完成记录")
+    resp = requests.get(f"{BASE}/api/calibration-records")
+    d = resp.json()
+    reviewer_rec_total = d["total"]
+    print(f"  reviewer 可见完成记录数: {reviewer_rec_total}")
+    check("reviewer 至少能看到 2 条完成记录", reviewer_rec_total >= 2, f"实际: {reviewer_rec_total}")
+
+    section("46.5 operator bob 查完成记录只能看自己提交的")
+    resp = requests.get(f"{BASE}/api/calibration-records", params={"viewer_username": "bob"})
+    d = resp.json()
+    print(f"  bob 可见完成记录数: {d['total']}")
+    if d["items"]:
+        bob_submitters = set(r.get("username") for r in d["items"])
+        check("bob 只看到自己提交的记录", bob_submitters.issubset({"bob"}), f"实际提交者: {bob_submitters}")
+
+    section("46.6 operator alice 查完成记录只能看自己提交的")
+    resp = requests.get(f"{BASE}/api/calibration-records", params={"viewer_username": "alice"})
+    d = resp.json()
+    print(f"  alice 可见完成记录数: {d['total']}")
+    if d["items"]:
+        alice_submitters = set(r.get("username") for r in d["items"])
+        check("alice 只看到自己提交的记录", alice_submitters.issubset({"alice"}), f"实际提交者: {alice_submitters}")
+
+    section("47. 设备校准 - 查询筛选功能（按设备、负责人、计划状态、日期范围）")
+
+    section("47.1 按设备查询计划")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={"equipment_code": "FRIDGE-001"})
+    d = resp.json()
+    check("按 FRIDGE-001 查到至少 1 条计划", d["total"] >= 1, f"实际: {d['total']}")
+    check("每条都是 FRIDGE-001 的计划", all(p.get("equipment_code") == "FRIDGE-001" for p in d["items"]))
+
+    section("47.2 按负责人查询计划")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={"owner_username": "bob"})
+    d = resp.json()
+    check("按 bob 查到至少 1 条计划", d["total"] >= 1, f"实际: {d['total']}")
+    check("每条 owner 都是 bob", all(p.get("owner_username") == "bob" for p in d["items"]))
+
+    section("47.3 按计划状态查询（COMPLETED）")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={"status": "COMPLETED"})
+    d = resp.json()
+    check("COMPLETED 状态至少 2 条", d["total"] >= 2, f"实际: {d['total']}")
+    check("每条 status 都是 COMPLETED", all(p.get("status") == "COMPLETED" for p in d["items"]))
+
+    section("47.4 按计划状态查询（SCHEDULED）")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={"status": "SCHEDULED"})
+    d = resp.json()
+    check("SCHEDULED 状态至少 1 条", d["total"] >= 1, f"实际: {d['total']}")
+
+    section("47.5 按日期范围查询计划")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={
+        "date_from": "2026-06-01",
+        "date_to": "2026-06-30"
+    })
+    d = resp.json()
+    print(f"  6月计划数: {d['total']}")
+    if d["items"]:
+        check("计划都在 6月内", all("2026-06" in (p.get("scheduled_date") or "") for p in d["items"]))
+
+    section("47.6 按设备查完成记录")
+    resp = requests.get(f"{BASE}/api/calibration-records", params={"equipment_code": "FRIDGE-001"})
+    d = resp.json()
+    check("FRIDGE-001 完成记录至少 1 条", d["total"] >= 1, f"实际: {d['total']}")
+
+    section("47.7 按日期范围格式非法（应 422）")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={"date_from": "bad-date"})
+    d = resp.json()
+    check("非法 date_from 返回 422", resp.status_code == 422, f"实际: {resp.status_code}")
+
+    section("48. 设备校准 - operator 完成 CENTRI 计划后再新建一个计划，用于重启验证")
+
+    section("48.1 reviewer 给 FRIDGE-001 再建一个 SCHEDULED 计划")
+    resp = requests.post(f"{BASE}/api/calibration-plans", json={
+        "username": "charlie",
+        "equipment_code": "FRIDGE-001",
+        "scheduled_date": "2027-04-01",
+        "owner_username": "bob"
+    })
+    d = resp.json()
+    check("FRIDGE-001 第二个计划创建成功", resp.status_code == 200)
+    fridge_plan2_id = d.get("id")
+
+    section("49. 设备校准 - JSON 导出（含设备、计划、完成记录、日志摘要）")
+    resp = requests.get(f"{BASE}/api/export/calibration")
+    export_data = resp.json()
+    print(f"  导出: 设备={export_data['equipment']['total']}, 计划={export_data['calibration_plans']['total']}, 完成记录={export_data['calibration_records']['total']}, 日志={export_data['audit_logs_summary']['total']}")
+    check("导出有 export_time 字段", "export_time" in export_data)
+    check("导出有 filter 字段", "filter" in export_data)
+    check("导出设备数 >= 3", export_data["equipment"]["total"] >= 3, f"实际: {export_data['equipment']['total']}")
+    check("导出计划数 >= 4", export_data["calibration_plans"]["total"] >= 4, f"实际: {export_data['calibration_plans']['total']}")
+    check("导出完成记录数 >= 2", export_data["calibration_records"]["total"] >= 2, f"实际: {export_data['calibration_records']['total']}")
+    check("导出日志数 >= 1", export_data["audit_logs_summary"]["total"] >= 1, f"实际: {export_data['audit_logs_summary']['total']}")
+
+    section("49.1 验证导出设备字段完整")
+    if export_data["equipment"]["records"]:
+        eq = export_data["equipment"]["records"][0]
+        check("导出设备有 code", "code" in eq)
+        check("导出设备有 category", "category" in eq)
+        check("导出设备有 calibration_cycle_days", "calibration_cycle_days" in eq)
+        check("导出设备有 status", "status" in eq)
+        check("导出设备有 owner_username", "owner_username" in eq)
+
+    section("49.2 验证导出计划字段完整")
+    if export_data["calibration_plans"]["records"]:
+        p = export_data["calibration_plans"]["records"][0]
+        check("导出计划有 equipment_code", "equipment_code" in p)
+        check("导出计划有 scheduled_date", "scheduled_date" in p)
+        check("导出计划有 owner_username", "owner_username" in p)
+        check("导出计划有 status", "status" in p)
+
+    section("49.3 验证导出完成记录字段完整")
+    if export_data["calibration_records"]["records"]:
+        r = export_data["calibration_records"]["records"][0]
+        check("导出记录有 operator", "operator" in r)
+        check("导出记录有 operator_role", "operator_role" in r)
+        check("导出记录有 completion_date", "completion_date" in r)
+        check("导出记录有 result", "result" in r)
+        check("导出记录有 plan_id", "plan_id" in r)
+
+    section("49.4 验证导出日志字段完整")
+    if export_data["audit_logs_summary"]["records"]:
+        l = export_data["audit_logs_summary"]["records"][0]
+        check("导出日志有 operator", "operator" in l)
+        check("导出日志有 action", "action" in l)
+        check("导出日志有 operated_at", "operated_at" in l)
+
+    section("49.5 按设备筛选导出")
+    resp = requests.get(f"{BASE}/api/export/calibration", params={"equipment_code": "FRIDGE-001"})
+    exp_fridge = resp.json()
+    print(f"  仅 FRIDGE-001 导出: 设备={exp_fridge['equipment']['total']}, 计划={exp_fridge['calibration_plans']['total']}")
+    check("按设备筛选后设备只有 FRIDGE-001", all(r["code"] == "FRIDGE-001" for r in exp_fridge["equipment"]["records"]))
+    if exp_fridge["calibration_plans"]["records"]:
+        check("计划都属于 FRIDGE-001", all(p["equipment_code"] == "FRIDGE-001" for p in exp_fridge["calibration_plans"]["records"]))
+
+    section("49.6 按状态筛选导出（SCHEDULED）")
+    resp = requests.get(f"{BASE}/api/export/calibration", params={"plan_status": "SCHEDULED"})
+    exp_sched = resp.json()
+    if exp_sched["calibration_plans"]["records"]:
+        check("按状态筛选后计划都是 SCHEDULED", all(p["status"] == "SCHEDULED" for p in exp_sched["calibration_plans"]["records"]))
+
+    with open("calibration_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(export_data, f, ensure_ascii=False, indent=2)
+    print("  已保存 calibration_before_restart.json")
+
+    section("50. 设备校准 - 保存重启前状态")
+
+    section("50.1 保存 FRIDGE-001 状态")
+    resp = requests.get(f"{BASE}/api/equipment/FRIDGE-001")
+    fridge_before = resp.json()
+    with open("cal_equipment_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(fridge_before, f, ensure_ascii=False, indent=2)
+
+    section("50.2 保存 PIPETTE-001 状态（已停用）")
+    resp = requests.get(f"{BASE}/api/equipment/PIPETTE-001")
+    pipette_before = resp.json()
+    with open("cal_equipment2_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(pipette_before, f, ensure_ascii=False, indent=2)
+
+    section("50.3 保存校准计划列表")
+    resp = requests.get(f"{BASE}/api/calibration-plans")
+    plans_before = resp.json()
+    with open("cal_plans_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(plans_before, f, ensure_ascii=False, indent=2)
+
+    section("50.4 保存完成记录列表")
+    resp = requests.get(f"{BASE}/api/calibration-records")
+    records_before = resp.json()
+    with open("cal_records_before_restart.json", "w", encoding="utf-8") as f:
+        json.dump(records_before, f, ensure_ascii=False, indent=2)
+
     section("15. 记录重启前状态（用于重启后比对）")
     resp = requests.get(f"{BASE}/api/batches/REG-TEST-001")
     before = resp.json()
@@ -1125,6 +1673,166 @@ def run_restart_checks():
     check("包含 TEMP_ALERT", "TEMP_ALERT" in temp_actions)
     check("包含 TEMP_ALERT_HANDLE", "TEMP_ALERT_HANDLE" in temp_actions)
 
+    section("32. 重启后 - 设备状态一致")
+    with open("cal_equipment_before_restart.json", "r", encoding="utf-8") as f:
+        fridge_before = json.load(f)
+    resp = requests.get(f"{BASE}/api/equipment/FRIDGE-001")
+    fridge_after = resp.json()
+    print(f"  FRIDGE-001 重启前: status={fridge_before['status']}, cycle={fridge_before['calibration_cycle_days']}, owner={fridge_before['owner_username']}")
+    print(f"  FRIDGE-001 重启后: status={fridge_after['status']}, cycle={fridge_after['calibration_cycle_days']}, owner={fridge_after['owner_username']}")
+    check("FRIDGE-001 status 一致", fridge_before["status"] == fridge_after["status"])
+    check("FRIDGE-001 calibration_cycle_days 一致", fridge_before["calibration_cycle_days"] == fridge_after["calibration_cycle_days"])
+    check("FRIDGE-001 owner 一致", fridge_before["owner_username"] == fridge_after["owner_username"])
+    check("FRIDGE-001 status 为 ACTIVE", fridge_after["status"] == "ACTIVE", f"实际: {fridge_after['status']}")
+
+    section("33. 重启后 - 停用设备状态一致")
+    with open("cal_equipment2_before_restart.json", "r", encoding="utf-8") as f:
+        pipette_before = json.load(f)
+    resp = requests.get(f"{BASE}/api/equipment/PIPETTE-001")
+    pipette_after = resp.json()
+    print(f"  PIPETTE-001 重启前: status={pipette_before['status']}")
+    print(f"  PIPETTE-001 重启后: status={pipette_after['status']}")
+    check("PIPETTE-001 status 一致", pipette_before["status"] == pipette_after["status"])
+    check("PIPETTE-001 仍为 DISABLED", pipette_after["status"] == "DISABLED", f"实际: {pipette_after['status']}")
+
+    section("34. 重启后 - 设备列表数量一致")
+    resp = requests.get(f"{BASE}/api/equipment")
+    eq_after = resp.json()
+    print(f"  重启后设备总数: {eq_after['total']}")
+    check("至少有 3 台设备", eq_after["total"] >= 3, f"实际: {eq_after['total']}")
+    codes = [e["code"] for e in eq_after["items"]]
+    check("FRIDGE-001 仍存在", "FRIDGE-001" in codes)
+    check("PIPETTE-001 仍存在", "PIPETTE-001" in codes)
+    check("CENTRI-001 仍存在", "CENTRI-001" in codes)
+
+    section("35. 重启后 - 校准计划状态和数量一致")
+    with open("cal_plans_before_restart.json", "r", encoding="utf-8") as f:
+        plans_before = json.load(f)
+    resp = requests.get(f"{BASE}/api/calibration-plans")
+    plans_after = resp.json()
+    print(f"  重启前计划总数: {plans_before['total']}, 重启后: {plans_after['total']}")
+    check("计划总数一致", plans_before["total"] == plans_after["total"], f"{plans_before['total']} vs {plans_after['total']}")
+
+    before_statuses = sorted([p["status"] for p in plans_before["items"]])
+    after_statuses = sorted([p["status"] for p in plans_after["items"]])
+    check("计划状态分布一致", before_statuses == after_statuses, f"{before_statuses} vs {after_statuses}")
+
+    before_completed = sum(1 for p in plans_before["items"] if p["status"] == "COMPLETED")
+    after_completed = sum(1 for p in plans_after["items"] if p["status"] == "COMPLETED")
+    before_scheduled = sum(1 for p in plans_before["items"] if p["status"] == "SCHEDULED")
+    after_scheduled = sum(1 for p in plans_after["items"] if p["status"] == "SCHEDULED")
+    check(f"COMPLETED 计划数量一致（{before_completed}）", before_completed == after_completed)
+    check(f"SCHEDULED 计划数量一致（{before_scheduled}）", before_scheduled == after_scheduled)
+
+    section("36. 重启后 - 校准完成记录数量一致")
+    with open("cal_records_before_restart.json", "r", encoding="utf-8") as f:
+        records_before = json.load(f)
+    resp = requests.get(f"{BASE}/api/calibration-records")
+    records_after = resp.json()
+    print(f"  重启前完成记录数: {records_before['total']}, 重启后: {records_after['total']}")
+    check("完成记录总数一致", records_before["total"] == records_after["total"], f"{records_before['total']} vs {records_after['total']}")
+
+    if records_before["items"] and records_after["items"]:
+        before_results = sorted([r["result"] for r in records_before["items"]])
+        after_results = sorted([r["result"] for r in records_after["items"]])
+        check("完成结果列表一致", before_results == after_results, f"{before_results} vs {after_results}")
+
+        before_submitters = sorted([r["username"] for r in records_before["items"]])
+        after_submitters = sorted([r["username"] for r in records_after["items"]])
+        check("提交人列表一致", before_submitters == after_submitters, f"{before_submitters} vs {after_submitters}")
+
+        before_equipment = sorted([r["equipment_code"] for r in records_before["items"]])
+        after_equipment = sorted([r["equipment_code"] for r in records_after["items"]])
+        check("涉及设备列表一致", before_equipment == after_equipment, f"{before_equipment} vs {after_equipment}")
+
+    section("37. 重启后 - 校准日志完整保留")
+    resp = requests.get(f"{BASE}/api/calibration-logs")
+    logs_after = resp.json()
+    print(f"  重启后校准日志总数: {logs_after['total']}")
+    check("校准日志数 >= 10", logs_after["total"] >= 10, f"实际: {logs_after['total']}")
+
+    actions_after = set(l["action"] for l in logs_after["items"])
+    print(f"  日志动作集合: {sorted(actions_after)}")
+    check("包含 EQUIPMENT_CREATE", "EQUIPMENT_CREATE" in actions_after)
+    check("包含 EQUIPMENT_UPDATE", "EQUIPMENT_UPDATE" in actions_after)
+    check("包含 EQUIPMENT_DISABLE", "EQUIPMENT_DISABLE" in actions_after)
+    check("包含 PLAN_SCHEDULE", "PLAN_SCHEDULE" in actions_after)
+    check("包含 PLAN_COMPLETE", "PLAN_COMPLETE" in actions_after)
+    check("包含 CYCLE_UPDATE", "CYCLE_UPDATE" in actions_after)
+    check("包含 OWNER_CHANGE", "OWNER_CHANGE" in actions_after)
+
+    section("38. 重启后 - 设备停用仍有效（不能再建计划或完成）")
+
+    section("38.1 停用设备不能新建计划")
+    resp = requests.post(f"{BASE}/api/calibration-plans", json={
+        "username": "charlie",
+        "equipment_code": "PIPETTE-001",
+        "scheduled_date": "2027-01-01"
+    })
+    d = resp.json()
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '停用'", "停用" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("38.2 停用设备不能修改")
+    resp = requests.put(f"{BASE}/api/equipment/PIPETTE-001", json={
+        "username": "charlie",
+        "name": "重启后尝试改名"
+    })
+    d = resp.json()
+    check("状态码 400", resp.status_code == 400, f"实际: {resp.status_code}")
+    check("错误信息含 '停用'", "停用" in d.get("detail", ""), f"实际: {d.get('detail')}")
+
+    section("39. 重启后 - 权限隔离仍生效")
+
+    section("39.1 bob 作为 operator 查询计划只能看到自己的")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={"viewer_username": "bob"})
+    d = resp.json()
+    if d["items"]:
+        check("bob 仍只能看到自己负责的计划", all(p.get("owner_username") in ["bob", None] for p in d["items"]))
+
+    section("39.2 alice 查完成记录只能看到自己提交的")
+    resp = requests.get(f"{BASE}/api/calibration-records", params={"viewer_username": "alice"})
+    d = resp.json()
+    if d["items"]:
+        alice_submitters = set(r.get("username") for r in d["items"])
+        check("alice 只看到自己提交的记录", alice_submitters.issubset({"alice"}), f"实际: {alice_submitters}")
+
+    section("40. 重启后 - 导出内容一致性")
+    with open("calibration_before_restart.json", "r", encoding="utf-8") as f:
+        export_before = json.load(f)
+    resp = requests.get(f"{BASE}/api/export/calibration")
+    export_after = resp.json()
+    print(f"  重启前导出: 设备={export_before['equipment']['total']}, 计划={export_before['calibration_plans']['total']}, 记录={export_before['calibration_records']['total']}, 日志={export_before['audit_logs_summary']['total']}")
+    print(f"  重启后导出: 设备={export_after['equipment']['total']}, 计划={export_after['calibration_plans']['total']}, 记录={export_after['calibration_records']['total']}, 日志={export_after['audit_logs_summary']['total']}")
+    check("导出设备总数一致", export_before["equipment"]["total"] == export_after["equipment"]["total"])
+    check("导出计划总数一致", export_before["calibration_plans"]["total"] == export_after["calibration_plans"]["total"])
+    check("导出完成记录总数一致", export_before["calibration_records"]["total"] == export_after["calibration_records"]["total"])
+    check("导出日志总数 >= 重启前", export_after["audit_logs_summary"]["total"] >= export_before["audit_logs_summary"]["total"])
+
+    if export_before["equipment"]["records"]:
+        before_eq_codes = sorted([r["code"] for r in export_before["equipment"]["records"]])
+        after_eq_codes = sorted([r["code"] for r in export_after["equipment"]["records"]])
+        check("导出设备编码列表一致", before_eq_codes == after_eq_codes, f"{before_eq_codes} vs {after_eq_codes}")
+
+    if export_before["calibration_records"]["records"]:
+        before_results = sorted([r["result"] for r in export_before["calibration_records"]["records"]])
+        after_results = sorted([r["result"] for r in export_after["calibration_records"]["records"]])
+        check("导出完成记录结果一致", before_results == after_results, f"{before_results} vs {after_results}")
+
+    section("41. 重启后 - 查询筛选仍正常")
+
+    section("41.1 按 FRIDGE-001 筛选计划")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={"equipment_code": "FRIDGE-001"})
+    d = resp.json()
+    check("FRIDGE-001 计划数 >= 2", d["total"] >= 2, f"实际: {d['total']}")
+    check("全部属于 FRIDGE-001", all(p["equipment_code"] == "FRIDGE-001" for p in d["items"]))
+
+    section("41.2 按 COMPLETED 状态筛选计划")
+    resp = requests.get(f"{BASE}/api/calibration-plans", params={"status": "COMPLETED"})
+    d = resp.json()
+    if d["items"]:
+        check("全部状态都是 COMPLETED", all(p["status"] == "COMPLETED" for p in d["items"]))
+
     section("重启后验证总结")
     print(f"  通过: {passed}, 失败: {failed}")
     for f in ["export_before_restart.json", "batch_before_restart.json", "batch2_before_restart.json",
@@ -1132,7 +1840,10 @@ def run_restart_checks():
               "transfers_before_restart.json", "batch_transfer_before_restart.json",
               "transfer_locations_before_restart.json",
               "temperature_before_restart.json", "temp_location_before_restart.json",
-              "temp_alerts_before_restart.json"]:
+              "temp_alerts_before_restart.json",
+              "calibration_before_restart.json",
+              "cal_equipment_before_restart.json", "cal_equipment2_before_restart.json",
+              "cal_plans_before_restart.json", "cal_records_before_restart.json"]:
         try:
             os.remove(f)
         except:

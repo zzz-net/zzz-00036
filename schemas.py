@@ -253,3 +253,183 @@ class TemperatureAlertHandleRequest(BaseModel):
     username: str
     reason: str = Field(min_length=1)
     disposal: str = Field(min_length=1)
+
+
+class EquipmentBase(BaseModel):
+    code: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=200)
+    category: str = Field(min_length=1, max_length=50)
+    manufacturer: Optional[str] = Field(default=None, max_length=200)
+    model: Optional[str] = Field(default=None, max_length=200)
+    serial_no: Optional[str] = Field(default=None, max_length=100)
+    location: Optional[str] = Field(default=None, max_length=200)
+    calibration_cycle_days: int = Field(gt=0, default=90)
+    owner_username: Optional[str] = None
+
+
+class EquipmentCreate(EquipmentBase):
+    username: str
+
+
+class EquipmentUpdate(BaseModel):
+    username: str
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    category: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    manufacturer: Optional[str] = Field(default=None, max_length=200)
+    model: Optional[str] = Field(default=None, max_length=200)
+    serial_no: Optional[str] = Field(default=None, max_length=100)
+    location: Optional[str] = Field(default=None, max_length=200)
+    calibration_cycle_days: Optional[int] = Field(default=None, gt=0)
+    owner_username: Optional[str] = None
+
+
+class EquipmentDisableRequest(BaseModel):
+    username: str
+    remark: Optional[str] = None
+
+
+class EquipmentResponse(BaseModel):
+    id: int
+    code: str
+    name: str
+    category: str
+    manufacturer: Optional[str] = None
+    model: Optional[str] = None
+    serial_no: Optional[str] = None
+    location: Optional[str] = None
+    calibration_cycle_days: int
+    status: str
+    owner_id: Optional[int] = None
+    owner_username: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class EquipmentListResponse(BaseModel):
+    items: List[EquipmentResponse]
+    total: int
+
+
+class CalibrationPlanCreate(BaseModel):
+    username: str
+    equipment_code: str
+    scheduled_date: str
+    owner_username: Optional[str] = None
+
+    @field_validator("scheduled_date", mode="before")
+    @classmethod
+    def validate_scheduled_date(cls, v):
+        try:
+            date.fromisoformat(v)
+        except (ValueError, TypeError):
+            raise ValueError("计划日期格式无效，需为 YYYY-MM-DD")
+        return v
+
+
+class CalibrationPlanScheduleUpdate(BaseModel):
+    username: str
+    scheduled_date: Optional[str] = None
+    owner_username: Optional[str] = None
+
+    @field_validator("scheduled_date", mode="before")
+    @classmethod
+    def validate_scheduled_date(cls, v):
+        if v is None:
+            return v
+        try:
+            date.fromisoformat(v)
+        except (ValueError, TypeError):
+            raise ValueError("计划日期格式无效，需为 YYYY-MM-DD")
+        return v
+
+
+class CalibrationPlanResponse(BaseModel):
+    id: int
+    equipment_id: int
+    equipment_code: Optional[str] = None
+    equipment_name: Optional[str] = None
+    scheduled_date: str
+    owner_id: Optional[int] = None
+    owner_username: Optional[str] = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CalibrationPlanListResponse(BaseModel):
+    items: List[CalibrationPlanResponse]
+    total: int
+
+
+class CalibrationRecordCreate(BaseModel):
+    username: str
+    completion_date: str
+    result: str = Field(min_length=1, max_length=50)
+    certificate_no: Optional[str] = Field(default=None, max_length=100)
+    remark: Optional[str] = None
+    next_calibration_date: Optional[str] = None
+
+    @field_validator("completion_date", "next_calibration_date", mode="before")
+    @classmethod
+    def validate_date_fields(cls, v):
+        if v is None:
+            return v
+        try:
+            date.fromisoformat(v)
+        except (ValueError, TypeError):
+            raise ValueError("日期格式无效，需为 YYYY-MM-DD")
+        return v
+
+
+class CalibrationRecordResponse(BaseModel):
+    id: int
+    plan_id: int
+    equipment_id: int
+    equipment_code: Optional[str] = None
+    equipment_name: Optional[str] = None
+    user_id: int
+    username: Optional[str] = None
+    user_role: Optional[str] = None
+    completion_date: str
+    result: str
+    certificate_no: Optional[str] = None
+    remark: Optional[str] = None
+    next_calibration_date: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CalibrationRecordListResponse(BaseModel):
+    items: List[CalibrationRecordResponse]
+    total: int
+
+
+class CalibrationLogResponse(BaseModel):
+    id: int
+    equipment_id: Optional[int] = None
+    equipment_code: Optional[str] = None
+    plan_id: Optional[int] = None
+    user_id: int
+    username: Optional[str] = None
+    user_role: Optional[str] = None
+    action: str
+    from_status: Optional[str] = None
+    to_status: Optional[str] = None
+    remark: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CalibrationLogListResponse(BaseModel):
+    items: List[CalibrationLogResponse]
+    total: int
